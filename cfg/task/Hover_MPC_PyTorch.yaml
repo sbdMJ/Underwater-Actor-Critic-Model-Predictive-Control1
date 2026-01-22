@@ -1,0 +1,58 @@
+name: HoverMPCPyTorch
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 1
+  env_spacing: 6
+  max_episode_length: 400
+
+# iLQR(MPC)에서 자코비안 계산이 무거워 CPU pipeline 기본
+sim:
+  device: cpu
+  use_gpu_pipeline: false
+  use_gpu: false
+
+drone_model:
+  name: BlueROV
+  controller: MPCPyTorchController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# Differentiable MPC(iLQR) 설정
+mpc_horizon: 15
+mpc_ilqr_iters: 6
+mpc_ilqr_reg: 1e-3
+mpc_terminal_mult: 10.0
+mpc_backprop: false
+mpc_eps: 1e-3
+# mpc_detach_unconverged: null   # null이면 mpc_backprop에 따라 자동 결정
+# mpc_exit_unconverged: false
+
+mpc_q_pos: 50.0
+mpc_q_quat: 5.0
+mpc_q_vel: 2.0
+mpc_q_omega: 0.5
+mpc_r_u: 0.02
+max_thruster_force: 40.0
+
+thrust_axis: 0
+# mpc_debug_print_B: true
+
+random_target_pos: true
+target_pos_min: [-1.0, -1.0, 1.5]
+target_pos_max: [1.0, 1.0, 2.5]
+
+terminate_distance: 10.0
+terminate_min_z: 0.1
+
+action_transform: null

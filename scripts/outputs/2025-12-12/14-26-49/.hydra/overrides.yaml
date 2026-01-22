@@ -1,0 +1,4 @@
+- +eval.ckpt=/home/mjkim/MarineGym/scripts/wandb/offline-run-20251208_195159-0dxwmiw3/files/checkpoint_final.pt
+- task=Hover
+- algo=ppo
+- headless=false

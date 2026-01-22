@@ -1,0 +1,7 @@
+- task=PathFollow
+- algo=ppo
+- env.num_envs=1
+- headless=false
+- enable_livestream=false
+- max_iters=50
+- total_frames=200000

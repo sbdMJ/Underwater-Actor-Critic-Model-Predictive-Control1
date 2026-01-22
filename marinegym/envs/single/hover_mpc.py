@@ -1,0 +1,80 @@
+import torch
+import numpy as np
+
+from marinegym.envs.single.hover import Hover
+
+
+class HoverMPC(Hover):
+    """
+    Hover 태스크를 MPCController로 제어하는 변형.
+
+    - RL action은 무시하고(있어도 덮어씀), 매 step에서 MPC로 스러스터 커맨드를 계산합니다.
+    - 기존 Hover의 관측/보상 정의는 그대로 재사용합니다.
+    """
+
+    def __init__(self, cfg, headless):
+        super().__init__(cfg, headless)
+        self._use_internal_mpc = bool(self.cfg.task.get("use_internal_mpc", True))
+        if self._use_internal_mpc:
+            self._init_controller()
+
+    def _init_controller(self):
+        from marinegym.controllers.mpc_controller import MPCController
+        from marinegym.controllers.thruster_allocation import (
+            compute_thruster_allocation_matrix_from_drone,
+        )
+
+        mass = float(self.drone.MASS_0.squeeze().item())
+        inertia_xx, inertia_yy, inertia_zz = self.drone.INERTIA_0.squeeze().tolist()
+
+        thrust_axis = int(self.cfg.task.get("thrust_axis", 0))
+        if "thruster_allocation" in self.drone.params:
+            B = np.asarray(self.drone.params["thruster_allocation"], dtype=np.float64)
+        else:
+            B = compute_thruster_allocation_matrix_from_drone(self.drone, thrust_axis=thrust_axis)
+
+        uav_params = {
+            "name": self.cfg.task.drone_model.name,
+            "mass": mass,
+            "inertia": {"xx": inertia_xx, "yy": inertia_yy, "zz": inertia_zz},
+            "hydro_coef": self.drone.params["hydro_coef"],
+            "thruster_allocation": B,
+            "volume": float(self.drone.params.get("volume", 0.0)),
+            "coBM": float(self.drone.params.get("coBM", 0.0)),
+            "rho": float(self.drone.params.get("rho", 997.0)),
+            "mpc_q_pos": float(self.cfg.task.get("mpc_q_pos", 50.0)),
+            "mpc_q_quat": float(self.cfg.task.get("mpc_q_quat", 5.0)),
+            "mpc_q_vel": float(self.cfg.task.get("mpc_q_vel", 2.0)),
+            "mpc_q_omega": float(self.cfg.task.get("mpc_q_omega", 0.5)),
+            "mpc_q_roll": float(self.cfg.task.get("mpc_q_roll", 0.0)),
+            "mpc_q_pitch": float(self.cfg.task.get("mpc_q_pitch", 0.0)),
+            "mpc_r_u": float(self.cfg.task.get("mpc_r_u", 0.01)),
+        }
+
+        horizon = int(self.cfg.task.get("mpc_horizon", 20))
+        dt = float(self.cfg.sim.dt)
+        self.controller = MPCController(g=9.81, uav_params=uav_params, dt=dt, N=horizon)
+
+        if bool(self.cfg.task.get("mpc_debug_print_B", False)):
+            np.set_printoptions(precision=3, suppress=True)
+            print("[HoverMPC] thrust_axis:", thrust_axis)
+            print("[HoverMPC] B (6 x n):\n", B)
+
+    def _pre_sim_step(self, tensordict):
+        if not getattr(self, "_use_internal_mpc", True):
+            return super()._pre_sim_step(tensordict)
+
+        # 최신 상태 업데이트(자세/속도 포함)
+        self.drone.get_state()
+
+        # MPC는 body-frame v/w를 가정하므로 vel_b 사용
+        root_state = torch.cat(
+            [self.drone.pos, self.drone.rot, self.drone.vel_b], dim=-1
+        ).squeeze(1)  # (num_envs, 13)
+        target_pos = self.target_pos.squeeze(1)
+        target_quat = self.target_rot.squeeze(1)
+
+        cmds = self.controller.compute(root_state, target_pos, target_quat=target_quat).unsqueeze(1)  # (num_envs, 1, 6)
+        tensordict.set(("agents", "action"), cmds)
+
+        self.effort = torch.abs(self.drone.apply_action(cmds))

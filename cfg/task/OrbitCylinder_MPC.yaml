@@ -1,0 +1,77 @@
+name: OrbitCylinderMPC
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 1
+  env_spacing: 6
+  # 1 episode = 1 lap (orbit_period_steps)
+  max_episode_length: 1800
+
+# PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
+# reset 시 PhysX 에러로 시뮬이 종료될 수 있어, MPC 태스크 기본은 CPU pipeline로 둡니다.
+sim:
+  device: cpu
+  use_gpu_pipeline: false
+  use_gpu: false
+
+drone_model:
+  name: BlueROV
+  controller: MPCController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# Cylinder-aware MPC 설정
+mpc_horizon: 20
+mpc_r_u: 0.01
+mpc_q_radial: 50.0
+mpc_q_z: 30.0
+mpc_q_tan: 10.0
+mpc_q_radial_speed: 5.0
+mpc_q_heading: 30.0
+mpc_q_roll: 60.0
+mpc_q_pitch: 60.0
+mpc_q_wxy: 0.5
+mpc_max_thruster_force: 40.0
+thrust_axis: 0
+
+# Orbit cylinder task params (env-frame)
+cylinder_center: [0.0, 0.0, 1.5]
+cylinder_radius: 0.4
+cylinder_height: 3.0
+cylinder:
+  color: [0.9, 0.4, 0.1]
+
+# Desired orbit: keep distance = orbit_radius from center (typically radius + clearance)
+orbit_clearance: 1.0
+orbit_radius: 1.4
+orbit_z: 1.5
+orbit_period_steps: 600
+orbit_direction: 1.0  # +1: CCW, -1: CW
+orbit_yaw_offset: 0.0
+hide_target_vis: true
+# desired tangential speed (m/s). If 0, controller uses 2*pi*R/(orbit_period_steps*dt)
+orbit_v_tan: 0.0
+
+# Spawn near the orbit (helps MPC converge quickly)
+random_target_pos: false
+random_target_yaw: false
+init_pos_min: [1.0, -0.3, 1.4]
+init_pos_max: [1.8, 0.3, 1.6]
+init_rpy_min: [0.0, 0.0, 0.0]
+init_rpy_max: [0.0, 0.0, 0.0]
+
+# MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
+terminate_distance: 10.0
+terminate_min_z: 0.1
+
+action_transform: null

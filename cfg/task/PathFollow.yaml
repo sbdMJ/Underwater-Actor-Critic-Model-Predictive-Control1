@@ -1,0 +1,70 @@
+name: PathFollow
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  # 렌더링/디버깅 기본값은 Hover처럼 64로 두고,
+  # 대규모 학습은 `env.num_envs=4096 headless=true` 등으로 override 권장.
+  num_envs: 10
+  env_spacing: 6
+  max_episode_length: 600
+
+drone_model:
+  name: BlueROV
+  controller: LeePositionController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.6
+
+# --- Path definition (random 3D loop) ---
+path_num_points: 96
+path_harmonics: 5
+path_radius_xy: 1.8
+path_z_amp: 0.6
+path_z_min: 0.6
+path_z_max: 3.2
+path_lookahead_steps: 6
+track_mode: path
+traj_steps_per_point: 4
+traj_lookahead_points: 1
+traj_target_radius: 0.5
+traj_future_points: 3
+
+# --- Observation ---
+obs_progress_sincos: true
+
+# --- Visualization (non-headless) ---
+draw_path: true
+# one of: central, env0, all
+draw_path_mode: all
+draw_path_color: [1.0, 0.2, 0.2, 1.0]
+draw_path_size: 2.0
+
+# --- Rewards ---
+reward_cte_weight: 1.0
+reward_cte_scale: 2.0
+reward_progress_weight: 0.7
+reward_align_weight: 0.2
+reward_heading_weight: 0.4
+reward_heading_scale: 2.0
+reward_roll_rate_weight: 0.2
+reward_roll_rate_scale: 1.0
+reward_forward_speed_weight: 0.3
+reward_forward_speed_scale: 1.0
+reward_stop_penalty_weight: 0.2
+reward_stop_speed_threshold: 0.1
+reward_align_speed_min: 0.05
+
+# --- Termination ---
+terminate_min_z: 0.2
+terminate_cte: 5.0
+
+action_transform: null

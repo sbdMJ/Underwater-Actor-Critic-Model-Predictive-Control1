@@ -1,0 +1,6 @@
+- task=Hover_PyPose_MPC
+- algo=ppo_pypose_mpc_qrdiag_tv
+- task.use_internal_mpc=false
+- headless=true
+- enable_livestream=false
+- env.num_envs=5

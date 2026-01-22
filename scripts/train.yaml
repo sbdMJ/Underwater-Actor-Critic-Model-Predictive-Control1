@@ -1,0 +1,48 @@
+# hydra.job.chdir: false
+hydra:
+  searchpath:
+    # see https://hydra.cc/docs/advanced/search_path/
+    # MARINEGYM_ROOT is set by entry scripts based on this repo's location.
+    - file://${oc.env:MARINEGYM_ROOT}/cfg
+
+headless: false
+enable_livestream: true
+mode: train
+
+sim: ${task.sim}
+env:
+  num_envs: ${task.env.num_envs}
+  env_spacing: ${task.env.env_spacing}
+  max_episode_length: ${task.env.max_episode_length}
+
+total_frames: 3_000_000 #20_000_000
+max_iters: -1
+eval_interval: -1
+save_interval: -1
+seed: 0
+
+# scripts/test_pypose_mpc.py overrides (Hydra strict mode friendly)
+mpc_test_steps: 300
+ppo_test_steps: 32
+mpc_alloc_path: /tmp/marinegym/pypose_mpc_thruster_alloc.npz
+
+viewer:
+  resolution: [2460, 1440]
+  eye: [8, 0., 6.]
+  lookat: [0., 0., 3.]
+
+wandb:
+  group: ${oc.select:..task.name}
+  run_name: ${oc.select:..task.name,test}-${oc.select:..algo.name,none}-${oc.select:..task.drone_model.name,none}
+  job_type: train
+  entity: your_wandb_entity_here
+  project: marine_gym
+  mode: offline # set to 'offline' when debugging locally
+  run_id:
+  monitor_gym: True
+  tags:
+
+defaults:
+  - task: Hover
+  - algo: ppo
+  - _self_

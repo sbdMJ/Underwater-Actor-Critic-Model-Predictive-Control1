@@ -1,0 +1,8 @@
+- task=Hover
+- algo=ac_mpc_pypose
+- env.num_envs=16
+- algo.mpc_N=5
+- algo.mpc_ilqr_iters=1
+- wandb.mode=offline
+- headless=true
+- enable_livestream=false

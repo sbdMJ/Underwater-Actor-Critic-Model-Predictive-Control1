@@ -1,0 +1,48 @@
+name: Hover
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 16
+  env_spacing: 6
+  max_episode_length: 200
+
+drone_model:
+  name: BlueROV
+  controller: LeePositionController
+
+force_sensor: false
+time_encoding: true
+
+# --- Reward (pose + position tracking) ---
+reward_distance_scale: 1.2
+reward_effort_weight: 0.0
+reward_action_smoothness_weight: 0.0
+reward_orientation_weight: 0.5
+reward_orientation_scale: 5.0
+
+# --- Random target position (local frame) ---
+random_target_pos: true
+target_pos_min: [-1.0, -1.0, 1.5]
+target_pos_max: [1.0, 1.0, 2.5]
+
+# --- Random target pose (multiples of pi) ---
+random_target_yaw: true
+target_rpy_min: [-0.1, -0.1, 0.0]
+target_rpy_max: [0.1, 0.1, 2.0]
+
+# Make the policy see the target pose.
+include_target_quat_in_obs: true
+
+# --- Optional init distribution (multiples of pi for rpy) ---
+init_pos_min: [-1.0, -1.0, 1.5]
+init_pos_max: [1.0, 1.0, 2.5]
+init_rpy_min: [-0.1, -0.1, 0.0]
+init_rpy_max: [0.1, 0.1, 2.0]
+
+action_transform: null
+

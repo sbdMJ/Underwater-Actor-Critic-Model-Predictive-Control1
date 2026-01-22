@@ -1,0 +1,7 @@
+- task=PathFollow
+- algo=ppo
+- headless=false
+- enable_livestream=false
+- task.reward_roll_rate_weight=0.5
+- task.reward_roll_rate_scale=2.0
+- task.reward_heading_weight=0.5

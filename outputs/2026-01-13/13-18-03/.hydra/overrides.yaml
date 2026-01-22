@@ -1,0 +1,6 @@
+- task=HoverPoseRandom
+- task.random_target_pos=false
+- algo=ac_mpc_pypose
+- headless=false
+- enable_livestream=false
+- wandb.mode=offline

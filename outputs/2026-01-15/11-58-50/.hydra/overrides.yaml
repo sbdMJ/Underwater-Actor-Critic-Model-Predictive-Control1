@@ -1,0 +1,7 @@
+- +eval.run_dir=/home/mjkim/MarineGym/wandb/offline-run-20260113_133253-t7yfdx19
+- task=Hover
+- algo=ac_mpc_pypose
+- headless=true
+- enable_livestream=false
+- +eval.num_episodes=10
+- env.num_envs=1

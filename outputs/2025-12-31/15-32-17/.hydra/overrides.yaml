@@ -1,0 +1,4 @@
+- task=PathFollow
+- algo=ppo
+- headless=true
+- enable_livestream=false

@@ -1,0 +1,6 @@
+- task=Hover_MPC_QP
+- algo=ppo
+- headless=false
+- enable_livestream=false
+- env.num_envs=8
+- total_frames=5000000

@@ -1,0 +1,286 @@
+import math
+from typing import Optional
+
+import numpy as np
+import torch
+
+from torchrl.data import BoundedTensorSpec, CompositeSpec
+from tensordict.tensordict import TensorDictBase
+
+from marinegym.envs.single.hover_mpc import HoverMPC
+
+
+def _set_acados_stage_weights(solver, stage: int, W: np.ndarray) -> bool:
+    try:
+        solver.set(stage, "W", W)
+        return True
+    except Exception:
+        pass
+    try:
+        solver.cost_set(stage, "W", W)
+        return True
+    except Exception:
+        return False
+
+
+class HoverMPCQP(HoverMPC):
+    """
+    HoverMPC variant where the RL action parameterizes the MPC cost.
+
+    - PPO action is interpreted as (q_raw, p_raw) in [-1, 1].
+    - The environment runs the internal MPC controller using these Q/p values
+      (by setting stage weights W and references yref).
+    - The RL action tensor is NOT overwritten (so PPO log_prob/action stay consistent).
+
+    Action layout (per env):
+      a = [q_raw (n_cost), p_raw (n_cost)]
+      n_cost = qp_nx_pred + nu, with default qp_nx_pred=12 and nu=#thrusters.
+    """
+
+    def __init__(self, cfg, headless):
+        # NOTE: IsaacEnv.__init__() calls _set_specs(), so initialize qp_* fields
+        # before super().__init__ to avoid AttributeError during spec construction.
+        self.qp_nx_pred = int(cfg.task.get("qp_nx_pred", 12))
+        self.qp_q_lb = float(cfg.task.get("qp_q_lb", 1e-3))
+        self.qp_q_ub = float(cfg.task.get("qp_q_ub", 1e2))
+        self.qp_p_signed = bool(cfg.task.get("qp_p_signed", True))
+        self.qp_p_lb = float(cfg.task.get("qp_p_lb", 0.0))
+        self.qp_p_ub = float(cfg.task.get("qp_p_ub", 1e1))
+        self.qp_update_W = bool(cfg.task.get("qp_update_W", True))
+        self.qp_q_map = str(cfg.task.get("qp_q_map", "linear")).strip().lower()
+
+        super().__init__(cfg, headless)
+
+        nu = int(self.drone.action_spec.shape[-1])
+        self._qp_n_cost = int(self.qp_nx_pred + nu)
+
+        self._warned_W = False
+
+        # Optional log-centered mapping (requires qp_q_lb>0).
+        if self.qp_q_map == "log_centered" and self.qp_q_lb > 0.0:
+            maxF = float(getattr(self.controller, "max_force_per_thruster", 40.0))
+            q_pos = float(self.cfg.task.get("mpc_q_pos", 50.0))
+            q_quat = float(self.cfg.task.get("mpc_q_quat", 5.0))
+            q_vel = float(self.cfg.task.get("mpc_q_vel", 2.0))
+            q_omega = float(self.cfg.task.get("mpc_q_omega", 0.5))
+            r_u_force = float(self.cfg.task.get("mpc_r_u", 0.01))
+            q_u_cmd = r_u_force * (maxF * maxF)
+
+            q0 = torch.ones(self._qp_n_cost, device=self.device, dtype=torch.float32)
+            if self.qp_nx_pred >= 12:
+                q0[0:3] = q_pos
+                q0[3:6] = q_quat
+                q0[6:9] = q_vel
+                q0[9:12] = q_omega
+            q0[self.qp_nx_pred :] = q_u_cmd
+            self._qp_q0 = q0
+            self._qp_log_span = float(math.log(self.qp_q_ub / self.qp_q_lb) / 2.0)
+        else:
+            self.qp_q_map = "linear"
+            self._qp_q0 = None
+            self._qp_log_span = None
+
+    def _set_specs(self):
+        super()._set_specs()
+        nu = int(self.drone.action_spec.shape[-1])
+        n_cost = int(self.qp_nx_pred + nu)
+        qp_dim = int(2 * n_cost)
+
+        qp_spec = BoundedTensorSpec(
+            low=-1.0,
+            high=1.0,
+            shape=(1, qp_dim),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.action_spec = CompositeSpec({"agents": CompositeSpec({"action": qp_spec})}).expand(self.num_envs).to(
+            self.device
+        )
+
+    def _decode_qp_action(self, action_qp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        action_qp = action_qp.reshape(-1, action_qp.shape[-1]).to(self.device)
+        n_cost = int(self._qp_n_cost)
+        if action_qp.shape[-1] != 2 * n_cost:
+            raise ValueError(f"Expected action dim {2*n_cost}, got {action_qp.shape[-1]}")
+
+        q_raw = action_qp[:, :n_cost].clamp(-1.0, 1.0)
+        p_raw = action_qp[:, n_cost:].clamp(-1.0, 1.0)
+
+        if self.qp_q_map == "log_centered":
+            q = self._qp_q0.unsqueeze(0) * torch.exp(q_raw * float(self._qp_log_span))
+        else:
+            # Linear map: q_raw in [-1,1] -> q in [qp_q_lb, qp_q_ub]
+            s = (q_raw + 1.0) * 0.5
+            q = float(self.qp_q_lb) + (float(self.qp_q_ub) - float(self.qp_q_lb)) * s
+        q = q.clamp(min=float(self.qp_q_lb), max=float(self.qp_q_ub))
+
+        if self.qp_p_signed:
+            p = float(self.qp_p_ub) * p_raw
+        else:
+            s = (p_raw + 1.0) * 0.5
+            p = float(self.qp_p_lb) + (float(self.qp_p_ub) - float(self.qp_p_lb)) * s
+        return q, p
+
+    def _compute_mpc_cmds_from_qp(
+        self,
+        root_state: torch.Tensor,
+        target_pos: torch.Tensor,
+        target_quat: torch.Tensor,
+        q: torch.Tensor,
+        p: torch.Tensor,
+    ) -> torch.Tensor:
+        controller = self.controller
+        solver = controller.solver
+
+        nx = int(controller.nx)
+        nu = int(controller.nu)
+        ny = int(controller.ny)
+        ny_e = int(controller.ny_e)
+        N = int(controller.N)
+        maxF = float(getattr(controller, "max_force_per_thruster", 40.0))
+
+        extra = int(ny - (nx + nu))
+        extra_e = int(ny_e - nx)
+        if extra not in (0, 2) or extra_e not in (0, 2):
+            raise RuntimeError(f"Unexpected MPC cost dims: ny={ny} nx={nx} nu={nu} ny_e={ny_e}")
+
+        B = int(root_state.shape[0])
+        cmds = torch.zeros((B, nu), device=root_state.device, dtype=root_state.dtype)
+
+        q_np = q.detach().cpu().numpy().astype(np.float64, copy=False)
+        p_np = p.detach().cpu().numpy().astype(np.float64, copy=False)
+
+        for i in range(B):
+            x0 = root_state[i].detach().cpu().numpy().astype(np.float64, copy=False)
+            tp = target_pos[i].detach().cpu().numpy().astype(np.float64, copy=False)
+            tq = target_quat[i].detach().cpu().numpy().astype(np.float64, copy=False)
+
+            solver.set(0, "lbx", x0)
+            solver.set(0, "ubx", x0)
+
+            x_ref_base = x0.copy()
+            x_ref_base[0:3] = tp[0:3]
+            x_ref_base[7:13] = 0.0
+
+            tq_norm = np.linalg.norm(tq)
+            if tq_norm > 0:
+                tq = tq / tq_norm
+            if np.dot(tq, x0[3:7]) < 0:
+                tq = -tq
+            x_ref_base[3:7] = tq
+
+            qk = q_np[i]
+            pk = p_np[i]
+
+            qx_pred = qk[: self.qp_nx_pred]
+            qu_cmd = qk[self.qp_nx_pred :]
+            px_pred = pk[: self.qp_nx_pred]
+            pu_cmd = pk[self.qp_nx_pred :]
+
+            if self.qp_nx_pred < 12:
+                raise ValueError(f"qp_nx_pred must be >= 12 for hover mapping, got {self.qp_nx_pred}")
+
+            qx_use = qx_pred[:12]
+            px_use = px_pred[:12]
+
+            qx_pred = np.maximum(qx_pred, 1e-6)
+            qu_cmd = np.maximum(qu_cmd, 1e-9)
+
+            # Map learned (rpos, rpy, v_b, w_b) weights to acados state (pos, quat, v_b, w_b).
+            q_pos = qx_use[0:3]
+            q_rpy = qx_use[3:6]
+            q_vel = qx_use[6:9]
+            q_omega = qx_use[9:12]
+            q_quat = float(np.mean(q_rpy))
+
+            qx_full = np.zeros(nx, dtype=np.float64)
+            qx_full[0:3] = q_pos
+            qx_full[3:7] = q_quat
+            qx_full[7:10] = q_vel
+            qx_full[10:13] = q_omega
+
+            qu_force = qu_cmd / (maxF * maxF)
+
+            if self.qp_update_W:
+                W = np.zeros((ny, ny), dtype=np.float64)
+                W[np.arange(nx), np.arange(nx)] = 2.0 * qx_full
+                if extra == 2:
+                    W[nx + 0, nx + 0] = 2.0 * float(q_rpy[0])
+                    W[nx + 1, nx + 1] = 2.0 * float(q_rpy[1])
+                    W[nx + 2 + np.arange(nu), nx + 2 + np.arange(nu)] = 2.0 * qu_force
+                else:
+                    W[nx + np.arange(nu), nx + np.arange(nu)] = 2.0 * qu_force
+
+                okW_all = True
+                for k in range(N):
+                    okW_all = _set_acados_stage_weights(solver, k, W) and okW_all
+                if (not okW_all) and (not self._warned_W):
+                    print(
+                        "[HoverMPCQP] WARNING: acados solver does not allow setting stage W; using fixed weights."
+                    )
+                    self._warned_W = True
+
+            # Linear term -> shift references: yref = -p/(2q).
+            x_ref = x_ref_base.copy()
+            rpos_ref = -px_use[0:3] / (2.0 * np.maximum(qx_use[0:3], 1e-6))
+            x_ref[0:3] = tp[0:3] - rpos_ref
+            v_ref = -px_use[6:9] / (2.0 * np.maximum(qx_use[6:9], 1e-6))
+            w_ref = -px_use[9:12] / (2.0 * np.maximum(qx_use[9:12], 1e-6))
+            x_ref[7:10] = v_ref
+            x_ref[10:13] = w_ref
+
+            u_ref_cmd = -pu_cmd / (2.0 * qu_cmd)
+            u_ref_cmd = np.clip(u_ref_cmd, -1.0, 1.0)
+            u_ref_force = np.clip(u_ref_cmd * maxF, -maxF, maxF)
+
+            yref = np.zeros(ny, dtype=np.float64)
+            yref[0:nx] = x_ref
+
+            if extra == 2:
+                w, x, y, z = x_ref[3], x_ref[4], x_ref[5], x_ref[6]
+                roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+                pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
+                yref[nx : nx + 2] = np.array([roll, pitch], dtype=np.float64)
+                yref[nx + 2 :] = u_ref_force
+            else:
+                yref[nx:] = u_ref_force
+
+            for k in range(N):
+                solver.set(k, "yref", yref)
+
+            yref_e = x_ref.copy()
+            if extra_e == 2:
+                yref_e = np.concatenate([yref_e, yref[nx : nx + 2]], axis=0)
+            solver.set(N, "yref", yref_e[:ny_e])
+
+            status = solver.solve()
+            if status != 0:
+                u_opt = np.zeros(nu, dtype=np.float64)
+            else:
+                u_opt = solver.get(0, "u")
+            u_cmd = np.clip(u_opt / maxF, -1.0, 1.0)
+            cmds[i].copy_(torch.as_tensor(u_cmd, device=cmds.device, dtype=cmds.dtype))
+
+        return cmds
+
+    def _pre_sim_step(self, tensordict: TensorDictBase):
+        self.drone.get_state()
+
+        action_qp = tensordict.get(("agents", "action"))
+        if action_qp is None:
+            raise KeyError("Missing ('agents','action') in tensordict.")
+
+        q, p = self._decode_qp_action(action_qp)
+
+        root_state = torch.cat([self.drone.pos, self.drone.rot, self.drone.vel_b], dim=-1).squeeze(1)
+        target_pos = self.target_pos.squeeze(1)
+        target_quat = self.target_rot.squeeze(1)
+
+        cmds = self._compute_mpc_cmds_from_qp(root_state, target_pos, target_quat, q=q, p=p).unsqueeze(1)
+        self.last_mpc_cmd = cmds.detach()
+        self.effort = torch.abs(self.drone.apply_action(cmds))
+
+    @torch.no_grad()
+    def decode_action_to_qp(self, action_qp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q, p = self._decode_qp_action(action_qp)
+        return q, p

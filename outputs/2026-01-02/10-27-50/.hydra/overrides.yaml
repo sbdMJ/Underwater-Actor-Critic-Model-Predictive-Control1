@@ -1,0 +1,5 @@
+- task=PathFollow
+- algo=ppo
+- headless=false
+- enable_livestream=false
+- task.reward_heading_weight=0.5

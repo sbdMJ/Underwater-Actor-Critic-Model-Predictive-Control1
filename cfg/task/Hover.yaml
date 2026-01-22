@@ -1,0 +1,43 @@
+name: Hover
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_ # Include the randomization settings
+  - disturbances@_here_ # Include the disturbance settings
+
+env:
+  num_envs: 64
+  env_spacing: 6
+  max_episode_length: 200
+
+drone_model:
+  name: BlueROV
+  controller: LeePositionController
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+reward_heading_weight: 0.0
+reward_orientation_weight: 0.0
+
+action_transform: null
+
+# --- Pose target settings ---
+# If target_rpy_min/max are set (in multiples of pi), full target pose is randomized.
+# Otherwise only yaw can be randomized via random_target_yaw.
+random_target_yaw: true
+target_rpy_min: null
+target_rpy_max: null
+
+# Include target quaternion in observation (enables true pose tracking for ac_mpc head).
+include_target_quat_in_obs: false
+
+# --- Optional initialization curriculum (multiples of pi for rpy) ---
+init_pos_min: [-2.5, -2.5, 1.5]
+init_pos_max: [2.5, 2.5, 2.5]
+init_rpy_min: [-0.2, -0.2, 0.0]
+init_rpy_max: [0.2, 0.2, 2.0]

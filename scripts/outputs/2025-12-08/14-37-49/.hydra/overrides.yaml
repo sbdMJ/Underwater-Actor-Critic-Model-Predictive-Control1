@@ -1,0 +1,4 @@
+- task=Hover
+- algo=ppo
+- headless=true
+- enable_livestream=true

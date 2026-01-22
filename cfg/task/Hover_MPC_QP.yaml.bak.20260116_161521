@@ -1,0 +1,79 @@
+name: HoverMPCQP
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 4
+  env_spacing: 6
+  max_episode_length: 400
+
+# HoverMPC default keeps CPU pipeline to avoid PhysX GPU teleport reset issues.
+sim:
+  device: cpu
+  use_gpu_pipeline: false
+  use_gpu: false
+
+drone_model:
+  name: BlueROV
+  controller: MPCController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# Base MPC settings (also used as the "action=0" baseline for learned Q/p).
+mpc_horizon: 20
+mpc_q_pos: 50.0
+mpc_q_vel: 2.0
+mpc_q_omega: 0.5
+mpc_q_quat: 5.0
+mpc_r_u: 0.01
+thrust_axis: 0
+
+# Randomize target per env (local frame)
+random_target_pos: true
+target_pos_min: [-1.0, -1.0, 1.5]
+target_pos_max: [1.0, 1.0, 2.5]
+
+terminate_distance: 10.0
+terminate_min_z: 0.1
+
+# Enable random flow disturbance during training too.
+disturbances:
+  train:
+    flow:
+      enable_flow: false
+      max_flow_velocity: [0.5, 0.5, 0.5, 0.0, 0.0, 0.0]
+      flow_velocity_gaussian_noise: [0.1, 0.1, 0.1, 0.0, 0.0, 0.0]
+    payload:
+      enable_payload: false
+
+# Q/p action interface (PPO action -> MPC weights/references)
+qp_nx_pred: 12
+qp_q_lb: 0.0
+qp_q_ub: 100.0
+# internal numerical floor for MPC stability (still keeps q in [0,100] conceptually)
+qp_q_eps: 1.0e-3
+# q mapping from PPO action([-1,1]) -> [qp_q_lb, qp_q_ub]
+qp_q_map: linear
+# p mapping: set qp_p_signed=true for [-qp_p_ub, +qp_p_ub]
+qp_p_signed: false
+qp_p_lb: 0.0
+qp_p_ub: 100.0
+# reference clipping for stability when p/q is large (units: m, m/s, rad/s, normalized cmd)
+qp_rpos_ref_clip: 2.0
+qp_vel_ref_clip: 2.0
+qp_omega_ref_clip: 3.0
+qp_u_ref_cmd_clip: 1.0
+# min input weight in force units to avoid singular W
+qp_u_weight_force_eps: 1.0e-9
+qp_update_W: true
+
+action_transform: null

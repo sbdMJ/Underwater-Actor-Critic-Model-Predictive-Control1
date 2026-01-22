@@ -1,0 +1,62 @@
+import os
+
+import hydra
+from omegaconf import OmegaConf
+from torchrl.envs.transforms import TransformedEnv, InitTracker, Compose
+
+from marinegym import init_simulation_app
+from marinegym.learning import ALGOS  # noqa: F401  (Hydra ConfigStore 등록용)
+
+
+FILE_PATH = os.path.dirname(__file__)
+
+# `scripts/train.yaml`의 `hydra.searchpath: file://../cfg`는 CWD 기준으로 해석되므로,
+# repo root에서 `python scripts/test_mpc.py ...`로 실행하면 cfg를 못 찾습니다.
+# 테스트 스크립트에서는 CWD를 scripts로 맞춰주어 안정적으로 로드되게 합니다.
+os.chdir(FILE_PATH)
+
+
+@hydra.main(version_base=None, config_path=FILE_PATH, config_name="train")
+def main(cfg):
+    """
+    MPC 기반 HoverMPC 환경이 실제로 step을 돌 수 있는지 확인하는 간단한 스모크 테스트.
+
+    예)
+      python scripts/test_mpc.py task=Hover_MPC headless=false enable_livestream=false env.num_envs=1
+    """
+    OmegaConf.register_new_resolver("eval", eval)
+    OmegaConf.resolve(cfg)
+    OmegaConf.set_struct(cfg, False)
+
+    simulation_app = init_simulation_app(cfg)
+
+    from marinegym.envs import IsaacEnv, register_tasks
+    register_tasks()
+
+    env_class = IsaacEnv.REGISTRY[cfg.task.name]
+    base_env = env_class(cfg, headless=cfg.headless)
+    env = TransformedEnv(base_env, Compose(InitTracker())).eval()
+    seed = int(cfg.get("seed", 0))
+    if seed < 0:
+        seed = int.from_bytes(os.urandom(4), "little")
+    print("[test_mpc] seed:", seed)
+    env.set_seed(seed)
+
+    td = env.reset()
+    dummy_action = env.action_spec.zero()
+
+    steps = int(cfg.get("mpc_test_steps", 1000))
+    for _ in range(steps):
+        if hasattr(dummy_action, "items"):
+            td.update(dummy_action)
+        else:
+            td.set(("agents", "action"), dummy_action)
+        td = env.step(td)["next"]
+        if not cfg.headless:
+            env.render()
+
+    simulation_app.close()
+
+
+if __name__ == "__main__":
+    main()

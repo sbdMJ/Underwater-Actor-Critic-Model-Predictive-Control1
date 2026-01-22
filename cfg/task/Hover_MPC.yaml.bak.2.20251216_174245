@@ -1,0 +1,42 @@
+name: HoverMPC
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 1
+  env_spacing: 6
+  max_episode_length: 400
+
+# PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
+# reset 시 PhysX 에러로 시뮬이 종료될 수 있어, HoverMPC 기본은 CPU pipeline로 둡니다.
+sim:
+  device: cpu
+  use_gpu_pipeline: false
+  use_gpu: false
+
+drone_model:
+  name: BlueROV
+  controller: MPCController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# HoverMPC 전용 설정
+mpc_horizon: 20
+mpc_q_pos: 50.0
+mpc_q_vel: 2.0
+mpc_q_omega: 0.5
+mpc_r_u: 0.01
+thrust_axis: 0
+# mpc_debug_print_B: true
+
+action_transform: null

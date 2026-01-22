@@ -1,0 +1,1 @@
+~/isaac410/python.sh scripts/test_mpc_path_follow.py task=Hover_MPC headless=false enable_livestream=false env.num_envs=1

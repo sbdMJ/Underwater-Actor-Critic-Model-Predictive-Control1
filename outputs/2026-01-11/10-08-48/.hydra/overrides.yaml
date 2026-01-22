@@ -1,0 +1,8 @@
+- task=HoverPose
+- algo=ac_mpc
+- headless=false
+- enable_livestream=false
+- env.num_envs=16
+- task.reward_effort_weight=0.0
+- algo.actor_log_std_min=-1.0
+- algo.entropy_coef=0.02

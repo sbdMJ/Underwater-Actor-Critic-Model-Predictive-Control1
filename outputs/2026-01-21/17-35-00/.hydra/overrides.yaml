@@ -1,0 +1,10 @@
+- task=Hover_PyPose_MPC
+- algo=ppo_pypose_mpc_qrdiag_tv
+- task.use_internal_mpc=false
+- headless=false
+- enable_livestream=false
+- env.num_envs=1
+- +eval.ckpt=/home/mjkim/MarineGym/wandb/offline-run-20260121_150344-p0j9ggir/files/checkpoints/checkpoint_600320.pt
+- +eval.steps=2000
+- +eval.print_every=200
+- +eval.print_weights_every=200
