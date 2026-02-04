@@ -29,6 +29,7 @@ from .ppo_pypose_mpc_qrconst import *
 from .ppo_pypose_mpc_qrdiag_tv import *
 from .ppo_acados_pypose_mpc_qrdiag_tv import *
 from .ppo_acados_hover_mpc_qrdiag import *
+from .ppo_pypose_cylinder_mpc_werr_wu_tv import *
 ALGOS = {
     "ppo": PPOPolicy,
     "ac_mpc": ACMPCPolicy,
@@ -36,6 +37,7 @@ ALGOS = {
     "ppo_pypose_mpc_qrdiag": PPOPyposeMPCQRDiagPolicy,
     "ppo_pypose_mpc_qrconst": PPOPyposeMPCQRConstPolicy,
     "ppo_pypose_mpc_qrdiag_tv": PPOPyposeMPCQRDiagTVPolicy,
+    "ppo_pypose_cylinder_mpc_werr_wu_tv": PPOPyposeCylinderMPCWErrWUTVPolicy,
     "ppo_acados_pypose_mpc_qrdiag_tv": PPOAcadosPyPoseMPCQRDiagTVPolicy,
     "ppo_acados_hover_mpc_qrdiag": PPOAcadosHoverMPCQRDiagPolicy,
 }

@@ -13,6 +13,7 @@ from marinegym import init_simulation_app
 from marinegym.learning import ALGOS  # noqa: F401  (Hydra ConfigStore 등록용)
 
 # ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/home/mjkim/MarineGym/wandb/offline-run-20260121_150344-p0j9ggir/files/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200 mode=evaluate
+# ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_mpc_qrdiag_tv +task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000
 
 
 
@@ -66,6 +67,75 @@ def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Pat
         algo.mpc_ilqr_iters = int(cfg.task.get("mpc_ilqr_iters", algo.get("mpc_ilqr_iters", 6)))
         algo.max_thruster_force = float(cfg.task.get("max_thruster_force", algo.get("max_thruster_force", 40.0)))
 
+    if algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
+        algo.mpc_horizon = int(cfg.task.get("pypose_mpc_horizon", cfg.task.get("mpc_horizon", algo.get("mpc_horizon", 15))))
+        algo.mpc_ilqr_iters = int(
+            cfg.task.get("pypose_mpc_ilqr_iters", cfg.task.get("mpc_ilqr_iters", algo.get("mpc_ilqr_iters", 6)))
+        )
+        algo.mpc_ilqr_reg = float(cfg.task.get("pypose_mpc_ilqr_reg", algo.get("mpc_ilqr_reg", 1e-3)))
+        algo.terminal_weight_mult = float(cfg.task.get("pypose_mpc_terminal_weight_mult", algo.get("terminal_weight_mult", 10.0)))
+        algo.max_thruster_force = float(
+            cfg.task.get(
+                "pypose_max_thruster_force",
+                cfg.task.get(
+                    "mpc_max_thruster_force",
+                    cfg.task.get("max_thruster_force", algo.get("max_thruster_force", 40.0)),
+                ),
+            )
+        )
+
+        algo.orbit_radius = float(cfg.task.get("orbit_radius", algo.get("orbit_radius", 1.4)))
+        algo.orbit_direction = 1.0 if float(cfg.task.get("orbit_direction", 1.0)) >= 0.0 else -1.0
+        algo.orbit_yaw_offset = float(cfg.task.get("orbit_yaw_offset", 0.0))
+
+        orbit_v_tan = float(cfg.task.get("orbit_v_tan", 0.0))
+        if orbit_v_tan <= 0.0:
+            orbit_period_steps = int(cfg.task.get("orbit_period_steps", cfg.task.get("max_episode_length", 1)))
+            dt = float(cfg.sim.dt)
+            r = float(algo.orbit_radius)
+            orbit_v_tan = float(2.0 * np.pi * r / (max(1, orbit_period_steps) * dt)) if r > 1e-6 else 0.0
+        algo.orbit_v_tan = float(orbit_v_tan)
+
+        orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
+        if orbit_target_mode in ("auto", ""):
+            reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
+            if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+                orbit_target_mode = "center"
+            else:
+                orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
+        if orbit_target_mode in ("waypoint", "moving_waypoint", "wp"):
+            algo.orbit_z = 0.0
+        else:
+            center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
+            algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
+
+        algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+
+        if not algo.get("werr_init", None):
+            q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
+            q_z = float(cfg.task.get("mpc_q_z", 30.0))
+            q_tan = float(cfg.task.get("mpc_q_tan", 10.0))
+            q_radial_speed = float(cfg.task.get("mpc_q_radial_speed", 5.0))
+            q_heading = float(cfg.task.get("mpc_q_heading", 30.0))
+            q_roll = float(cfg.task.get("mpc_q_roll", 60.0))
+            q_pitch = float(cfg.task.get("mpc_q_pitch", 60.0))
+            q_wxy = float(cfg.task.get("mpc_q_wxy", 0.5))
+            algo.werr_init = [
+                q_radial,
+                q_z,
+                q_tan,
+                q_radial_speed,
+                q_heading,
+                q_heading,
+                q_roll,
+                q_pitch,
+                q_wxy,
+                q_wxy,
+            ]
+        if not algo.get("wu_init", None):
+            r_u = float(cfg.task.get("mpc_r_u", 0.01))
+            algo.wu_init = [r_u] * int(algo.mpc_nu)
+
     if algo_name in ("ppo_pypose_mpc_qrdiag", "ppo_pypose_mpc_qrdiag_tv"):
         if not algo.get("wx_init", None):
             q_pos = float(cfg.task.get("mpc_q_pos", 50.0))
@@ -98,6 +168,48 @@ def _find_pypose_tv_actor(policy) -> Optional[torch.nn.Module]:
     return None
 
 
+def _load_policy_state(policy, checkpoint_path: Path, device):
+    ckpt = torch.load(str(checkpoint_path), map_location=device)
+
+    # Some scripts may wrap the state dict in a dict (wandb artifacts, etc.)
+    if isinstance(ckpt, dict):
+        for key in ("policy", "policy_state_dict", "model", "state_dict", "net"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                ckpt = ckpt[key]
+                break
+
+    if not isinstance(ckpt, dict):
+        raise TypeError(f"Checkpoint is not a state_dict-like dict. type={type(ckpt)}")
+
+    base_sd = policy.state_dict()
+    merged = {}
+    mismatched = []
+
+    for key, value in ckpt.items():
+        if key in base_sd:
+            if hasattr(value, "shape") and hasattr(base_sd[key], "shape") and value.shape != base_sd[key].shape:
+                mismatched.append((key, tuple(value.shape), tuple(base_sd[key].shape)))
+                continue
+            merged[key] = value
+
+    missing = [key for key in base_sd.keys() if key not in merged]
+    for key in missing:
+        merged[key] = base_sd[key]
+
+    if mismatched:
+        print("[eval] shape mismatched keys -> use default init for them:")
+        for key, s1, s2 in mismatched[:30]:
+            print("  ", key, s1, "!=", s2)
+        if len(mismatched) > 30:
+            print("  ...", len(mismatched) - 30, "more")
+
+    if missing:
+        print("[eval] filled missing keys:", missing[:30], ("..." if len(missing) > 30 else ""))
+
+    policy.load_state_dict(merged, strict=True)
+    policy.eval()
+
+
 def _summarize_weights(w_x_seq: torch.Tensor, w_u_seq: torch.Tensor):
     # w_x_seq: (B,H,13) w_u_seq: (B,H,nu)
     wx0 = w_x_seq[:, 0, :]
@@ -120,6 +232,32 @@ def _summarize_weights(w_x_seq: torch.Tensor, w_u_seq: torch.Tensor):
     return s0, sL
 
 
+def _summarize_orbit_weights(w_err_seq: torch.Tensor, w_u_seq: torch.Tensor):
+    # w_err_seq: (B,H,10) w_u_seq: (B,H,nu)
+    we0 = w_err_seq[:, 0, :]
+    weL = w_err_seq[:, -1, :]
+    wu0 = w_u_seq[:, 0, :]
+    wuL = w_u_seq[:, -1, :]
+
+    def _group(we: torch.Tensor):
+        return {
+            "q_radial": float(we[:, 0].mean().item()),
+            "q_z": float(we[:, 1].mean().item()),
+            "q_tan": float(we[:, 2].mean().item()),
+            "q_radial_speed": float(we[:, 3].mean().item()),
+            "q_heading": float(we[:, 4:6].mean().item()),
+            "q_roll": float(we[:, 6].mean().item()),
+            "q_pitch": float(we[:, 7].mean().item()),
+            "q_wxy": float(we[:, 8:10].mean().item()),
+        }
+
+    s0 = _group(we0)
+    sL = _group(weL)
+    s0["r_u"] = float(wu0.mean().item())
+    sL["r_u"] = float(wuL.mean().item())
+    return s0, sL
+
+
 @hydra.main(version_base=None, config_path=FILE_PATH, config_name="train")
 def main(cfg):
     """
@@ -129,6 +267,9 @@ def main(cfg):
       python scripts/evaluate_pypose_mpc_ppo.py task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv \\
         task.use_internal_mpc=false headless=true enable_livestream=false env.num_envs=1 mode=evaluate \\
         +eval.ckpt=/path/to/run/checkpoints/checkpoint_final.pt +eval.steps=2000 +eval.print_every=200
+
+        ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1 mode=evaluate   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200   +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
+
     """
     OmegaConf.register_new_resolver("eval", eval)
     OmegaConf.resolve(cfg)
@@ -146,6 +287,9 @@ def main(cfg):
     seed = int(eval_cfg.get("seed", cfg.get("seed", 0)))
     print_every = int(eval_cfg.get("print_every", 200))
     print_weights_every = int(eval_cfg.get("print_weights_every", print_every))
+    render = bool(eval_cfg.get("render", not cfg.headless))
+    render_interval = int(eval_cfg.get("render_interval", 2))
+    video_path = str(eval_cfg.get("video_path", "") or "")
 
     simulation_app = init_simulation_app(cfg)
 
@@ -156,9 +300,10 @@ def main(cfg):
     base_env = env_class(cfg, headless=cfg.headless)
     env = TransformedEnv(base_env, Compose(InitTracker())).eval()
     env.set_seed(seed)
+    base_env.enable_render(render)
 
     algo_name = str(cfg.algo.name).lower()
-    if algo_name.startswith("ppo_pypose_mpc_"):
+    if algo_name.startswith("ppo_pypose_mpc_") or algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
         _maybe_prepare_pypose_mpc_cfg(cfg, base_env, algo_name=algo_name, out_dir=Path.cwd() / algo_name)
 
     policy = ALGOS[algo_name](
@@ -168,14 +313,13 @@ def main(cfg):
         env.reward_spec,
         device=base_env.device,
     )
-    sd = torch.load(str(ckpt_path), map_location="cpu")
-    policy.load_state_dict(sd, strict=False)
-    policy.eval()
+    _load_policy_state(policy, ckpt_path, device="cpu")
 
     mpc_actor = _find_pypose_tv_actor(policy)
 
     td = env.reset()
     episode_stats = []
+    frames = []
 
     with set_exploration_type(ExplorationType.MODE):
         for t in range(steps):
@@ -193,14 +337,23 @@ def main(cfg):
                     obs = td[("agents", "observation")].squeeze(-2)
                     obs_flat = obs.reshape(-1, obs.shape[-1])
                     with torch.no_grad():
-                        w_x_seq, w_u_seq = mpc_actor.cost_map(obs_flat)
-                    s0, sL = _summarize_weights(w_x_seq, w_u_seq)
+                        w_a_seq, w_u_seq = mpc_actor.cost_map(obs_flat)
+                    if int(w_a_seq.shape[-1]) == 13:
+                        s0, sL = _summarize_weights(w_a_seq, w_u_seq)
+                    else:
+                        s0, sL = _summarize_orbit_weights(w_a_seq, w_u_seq)
                     print(f"[eval] t={t} w0={s0} wT={sL}")
                 except Exception:
                     pass
 
             td = policy(td)
             td = env.step(td)["next"]
+
+            if render and video_path and render_interval > 0 and (t % render_interval) == 0:
+                try:
+                    frames.append(env.render(mode="rgb_array"))
+                except Exception:
+                    pass
 
             done = td.get("done", None)
             if done is not None and bool(done.any()):
@@ -224,9 +377,18 @@ def main(cfg):
     else:
         print("[eval] No completed episodes during evaluation (increase eval.steps or reduce max_episode_length).")
 
+    if video_path and frames:
+        try:
+            from torchvision.io import write_video
+
+            fps = 1.0 / (cfg.sim.dt * cfg.sim.substeps * max(1, render_interval))
+            write_video(video_path, torch.as_tensor(np.stack(frames)), fps=fps)
+            print(f"[eval] saved video: {video_path}")
+        except Exception as e:
+            print(f"[eval] failed to save video (install torchvision or disable eval.video_path): {e}")
+
     simulation_app.close()
 
 
 if __name__ == "__main__":
     main()
-

@@ -2,7 +2,78 @@ name: BlueROVHeavy
 
 drag_coef: 0.3
 volume: 0.0113459
-coBM: 0.01
+# CoB offset along `cobm_axis` in the vehicle's *rigid-body* local frame (meters).
+# If the vehicle "self-rights" into a 90deg-pitched pose, `cobm_axis` is likely wrong for this asset.
+coBM: -0.01
+
+# BlueROVHeavy visual frame is rotated relative to the rigid-body frame; use +X as "up" for buoyancy torque.
+# (unit vector, or 'x'/'y'/'z')
+cobm_axis: y
+
+# Mass/buoyancy tuning.
+# If the USD link masses are missing/incorrect, the vehicle can drift vertically even with zero thruster commands.
+# - mass: total mass target (kg)
+# - buoyancy_mode:
+#     - volume: buoyancy = rho*g*volume (physical, requires correct mass/volume)
+#     - neutral: buoyancy = weight (cancels gravity at rest; good for debugging)
+mass: 11.31
+buoyancy_mode: neutral
+
+# Asset is authored with a different base axis; rotate +90deg around X to be upright.
+# (multiples of pi)
+model_rpy_offset: [0.5, 0.0, 0.0]
+
+# --- Thruster prim mapping (BlueROV-style: apply forces on rotor prims) ---
+# BlueROVHeavy assembly stores rotor prims under this nested path.
+base_link_relpath: tn__BROV2HEAVYASMBROV2HEAVYR1_xa0BFLR/Default
+rotor_prim_pattern: tn__BROV2HEAVYASMBROV2HEAVYR1_xa0BFLR/rotor_*
+
+# Use rotor prim local axis as thrust axis (direct mode).
+# For this assembly, the actual thruster direction aligns with rotor local +Z.
+# Allowed: x/y/z/-x/-y/-z or 0/1/2.
+thrust_axis: x
+
+# If true, ignores rotor prim local axes and applies a wrench via allocation matrix instead.
+use_virtual_rotors: true
+
+# Stabilize MPC bring-up: disable hydrodynamics (added mass/damping/coriolis) to avoid NaNs from
+# frame-convention mismatches; enable later once stable.
+disable_hydrodynamics: true
+
+# Conservative safety clamps for PhysX (avoid invalid transforms from extreme wrenches).
+max_applied_force: 200.0
+max_applied_torque: 50.0
+
+# Virtual thruster frames (body frame). `dir` is the thrust direction for +command.
+virtual_rotor_frames:
+  - name: rotor_0
+    pos: [0.25, 0.15, 0.0]
+    dir: [0.70710678, 0.70710678, 0.0]
+  - name: rotor_1
+    pos: [0.25, -0.15, 0.0]
+    dir: [0.70710678, -0.70710678, 0.0]
+  - name: rotor_2
+    pos: [-0.25, 0.15, 0.0]
+    dir: [-0.70710678, 0.70710678, 0.0]
+  - name: rotor_3
+    pos: [-0.25, -0.15, 0.0]
+    dir: [-0.70710678, -0.70710678, 0.0]
+  - name: rotor_4
+    pos: [0.20, 0.15, 0.0]
+    dir: [0.0, 0.0, 1.0]
+  - name: rotor_5
+    pos: [0.20, -0.15, 0.0]
+    dir: [0.0, 0.0, 1.0]
+  - name: rotor_6
+    pos: [-0.20, 0.15, 0.0]
+    dir: [0.0, 0.0, 1.0]
+  - name: rotor_7
+    pos: [-0.20, -0.15, 0.0]
+    dir: [0.0, 0.0, 1.0]
+
+# Visual assembly를 stage에 로드하되, 디버깅 편의를 위해 Default/rotor_*만 보이게 합니다.
+visual_keep_only_default_and_rotors: true
+
 hydro_coef:
   added_mass:
   - 5.5

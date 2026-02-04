@@ -447,17 +447,7 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
         cost_scaling[7] = 0.016;
         cost_scaling[8] = 0.016;
         cost_scaling[9] = 0.016;
-        cost_scaling[10] = 0.016;
-        cost_scaling[11] = 0.016;
-        cost_scaling[12] = 0.016;
-        cost_scaling[13] = 0.016;
-        cost_scaling[14] = 0.016;
-        cost_scaling[15] = 0.016;
-        cost_scaling[16] = 0.016;
-        cost_scaling[17] = 0.016;
-        cost_scaling[18] = 0.016;
-        cost_scaling[19] = 0.016;
-        cost_scaling[20] = 1;
+        cost_scaling[10] = 1;
         for (int i = 0; i <= N; i++)
         {
             ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "scaling", &cost_scaling[i]);
@@ -483,9 +473,9 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
 
    double* W_0 = calloc(NY0*NY0, sizeof(double));
     // change only the non-zero elements:
-    W_0[0+(NY0) * 0] = 50;
-    W_0[1+(NY0) * 1] = 50;
-    W_0[2+(NY0) * 2] = 50;
+    W_0[0+(NY0) * 0] = 20;
+    W_0[1+(NY0) * 1] = 20;
+    W_0[2+(NY0) * 2] = 20;
     W_0[3+(NY0) * 3] = 5;
     W_0[4+(NY0) * 4] = 5;
     W_0[5+(NY0) * 5] = 5;
@@ -496,12 +486,14 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
     W_0[10+(NY0) * 10] = 0.5;
     W_0[11+(NY0) * 11] = 0.5;
     W_0[12+(NY0) * 12] = 0.5;
-    W_0[13+(NY0) * 13] = 0.01;
-    W_0[14+(NY0) * 14] = 0.01;
-    W_0[15+(NY0) * 15] = 0.01;
-    W_0[16+(NY0) * 16] = 0.01;
-    W_0[17+(NY0) * 17] = 0.01;
-    W_0[18+(NY0) * 18] = 0.01;
+    W_0[13+(NY0) * 13] = 0.05;
+    W_0[14+(NY0) * 14] = 0.05;
+    W_0[15+(NY0) * 15] = 0.05;
+    W_0[16+(NY0) * 16] = 0.05;
+    W_0[17+(NY0) * 17] = 0.05;
+    W_0[18+(NY0) * 18] = 0.05;
+    W_0[19+(NY0) * 19] = 0.05;
+    W_0[20+(NY0) * 20] = 0.05;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
     free(W_0);
     double* yref = calloc(NY, sizeof(double));
@@ -514,9 +506,9 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
     free(yref);
     double* W = calloc(NY*NY, sizeof(double));
     // change only the non-zero elements:
-    W[0+(NY) * 0] = 50;
-    W[1+(NY) * 1] = 50;
-    W[2+(NY) * 2] = 50;
+    W[0+(NY) * 0] = 20;
+    W[1+(NY) * 1] = 20;
+    W[2+(NY) * 2] = 20;
     W[3+(NY) * 3] = 5;
     W[4+(NY) * 4] = 5;
     W[5+(NY) * 5] = 5;
@@ -527,12 +519,14 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
     W[10+(NY) * 10] = 0.5;
     W[11+(NY) * 11] = 0.5;
     W[12+(NY) * 12] = 0.5;
-    W[13+(NY) * 13] = 0.01;
-    W[14+(NY) * 14] = 0.01;
-    W[15+(NY) * 15] = 0.01;
-    W[16+(NY) * 16] = 0.01;
-    W[17+(NY) * 17] = 0.01;
-    W[18+(NY) * 18] = 0.01;
+    W[13+(NY) * 13] = 0.05;
+    W[14+(NY) * 14] = 0.05;
+    W[15+(NY) * 15] = 0.05;
+    W[16+(NY) * 16] = 0.05;
+    W[17+(NY) * 17] = 0.05;
+    W[18+(NY) * 18] = 0.05;
+    W[19+(NY) * 19] = 0.05;
+    W[20+(NY) * 20] = 0.05;
 
     for (int i = 1; i < N; i++)
     {
@@ -546,9 +540,9 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
 
     double* W_e = calloc(NYN*NYN, sizeof(double));
     // change only the non-zero elements:
-    W_e[0+(NYN) * 0] = 50;
-    W_e[1+(NYN) * 1] = 50;
-    W_e[2+(NYN) * 2] = 50;
+    W_e[0+(NYN) * 0] = 20;
+    W_e[1+(NYN) * 1] = 20;
+    W_e[2+(NYN) * 2] = 20;
     W_e[3+(NYN) * 3] = 5;
     W_e[4+(NYN) * 4] = 5;
     W_e[5+(NYN) * 5] = 5;
@@ -627,21 +621,27 @@ void bluerov_mpc_acados_setup_nlp_in(bluerov_mpc_solver_capsule* capsule, const 
     idxbu[3] = 3;
     idxbu[4] = 4;
     idxbu[5] = 5;
+    idxbu[6] = 6;
+    idxbu[7] = 7;
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
-    lbu[0] = -40;
-    ubu[0] = 40;
-    lbu[1] = -40;
-    ubu[1] = 40;
-    lbu[2] = -40;
-    ubu[2] = 40;
-    lbu[3] = -40;
-    ubu[3] = 40;
-    lbu[4] = -40;
-    ubu[4] = 40;
-    lbu[5] = -40;
-    ubu[5] = 40;
+    lbu[0] = -15;
+    ubu[0] = 15;
+    lbu[1] = -15;
+    ubu[1] = 15;
+    lbu[2] = -15;
+    ubu[2] = 15;
+    lbu[3] = -15;
+    ubu[3] = 15;
+    lbu[4] = -15;
+    ubu[4] = 15;
+    lbu[5] = -15;
+    ubu[5] = 15;
+    lbu[6] = -15;
+    ubu[6] = 15;
+    lbu[7] = -15;
+    ubu[7] = 15;
 
     for (int i = 0; i < N; i++)
     {
@@ -763,7 +763,7 @@ static void bluerov_mpc_acados_create_set_opts(bluerov_mpc_solver_capsule* capsu
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "levenberg_marquardt", &levenberg_marquardt);
 
     /* options QP solver */
-    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 20;
+    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 10;
     qp_solver_cond_N = N < qp_solver_cond_N_ori ? N : qp_solver_cond_N_ori; // use the minimum value here
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 

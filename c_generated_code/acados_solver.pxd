@@ -30,34 +30,34 @@
 
 cimport acados_solver_common
 
-cdef extern from "acados_solver_pypose_mpc_alloc_tv.h":
-    ctypedef struct nlp_solver_capsule "pypose_mpc_alloc_tv_solver_capsule":
+cdef extern from "acados_solver_bluerov_cylinder_orbit_mpc.h":
+    ctypedef struct nlp_solver_capsule "bluerov_cylinder_orbit_mpc_solver_capsule":
         pass
 
-    nlp_solver_capsule * acados_create_capsule "pypose_mpc_alloc_tv_acados_create_capsule"()
-    int acados_free_capsule "pypose_mpc_alloc_tv_acados_free_capsule"(nlp_solver_capsule *capsule)
+    nlp_solver_capsule * acados_create_capsule "bluerov_cylinder_orbit_mpc_acados_create_capsule"()
+    int acados_free_capsule "bluerov_cylinder_orbit_mpc_acados_free_capsule"(nlp_solver_capsule *capsule)
 
-    int acados_create "pypose_mpc_alloc_tv_acados_create"(nlp_solver_capsule * capsule)
+    int acados_create "bluerov_cylinder_orbit_mpc_acados_create"(nlp_solver_capsule * capsule)
 
-    int acados_create_with_discretization "pypose_mpc_alloc_tv_acados_create_with_discretization"(nlp_solver_capsule * capsule, int n_time_steps, double* new_time_steps)
-    int acados_update_time_steps "pypose_mpc_alloc_tv_acados_update_time_steps"(nlp_solver_capsule * capsule, int N, double* new_time_steps)
-    int acados_update_qp_solver_cond_N "pypose_mpc_alloc_tv_acados_update_qp_solver_cond_N"(nlp_solver_capsule * capsule, int qp_solver_cond_N)
+    int acados_create_with_discretization "bluerov_cylinder_orbit_mpc_acados_create_with_discretization"(nlp_solver_capsule * capsule, int n_time_steps, double* new_time_steps)
+    int acados_update_time_steps "bluerov_cylinder_orbit_mpc_acados_update_time_steps"(nlp_solver_capsule * capsule, int N, double* new_time_steps)
+    int acados_update_qp_solver_cond_N "bluerov_cylinder_orbit_mpc_acados_update_qp_solver_cond_N"(nlp_solver_capsule * capsule, int qp_solver_cond_N)
 
-    int acados_update_params "pypose_mpc_alloc_tv_acados_update_params"(nlp_solver_capsule * capsule, int stage, double *value, int np_)
-    int acados_update_params_sparse "pypose_mpc_alloc_tv_acados_update_params_sparse"(nlp_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
-    int acados_set_p_global_and_precompute_dependencies "pypose_mpc_alloc_tv_acados_set_p_global_and_precompute_dependencies"(nlp_solver_capsule * capsule, double *value, int data_len)
-    int acados_solve "pypose_mpc_alloc_tv_acados_solve"(nlp_solver_capsule * capsule)
-    int acados_reset "pypose_mpc_alloc_tv_acados_reset"(nlp_solver_capsule * capsule, int reset_qp_solver_mem)
-    int acados_free "pypose_mpc_alloc_tv_acados_free"(nlp_solver_capsule * capsule)
-    void acados_print_stats "pypose_mpc_alloc_tv_acados_print_stats"(nlp_solver_capsule * capsule)
+    int acados_update_params "bluerov_cylinder_orbit_mpc_acados_update_params"(nlp_solver_capsule * capsule, int stage, double *value, int np_)
+    int acados_update_params_sparse "bluerov_cylinder_orbit_mpc_acados_update_params_sparse"(nlp_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
+    int acados_set_p_global_and_precompute_dependencies "bluerov_cylinder_orbit_mpc_acados_set_p_global_and_precompute_dependencies"(nlp_solver_capsule * capsule, double *value, int data_len)
+    int acados_solve "bluerov_cylinder_orbit_mpc_acados_solve"(nlp_solver_capsule * capsule)
+    int acados_reset "bluerov_cylinder_orbit_mpc_acados_reset"(nlp_solver_capsule * capsule, int reset_qp_solver_mem)
+    int acados_free "bluerov_cylinder_orbit_mpc_acados_free"(nlp_solver_capsule * capsule)
+    void acados_print_stats "bluerov_cylinder_orbit_mpc_acados_print_stats"(nlp_solver_capsule * capsule)
 
-    int acados_custom_update "pypose_mpc_alloc_tv_acados_custom_update"(nlp_solver_capsule* capsule, double * data, int data_len)
+    int acados_custom_update "bluerov_cylinder_orbit_mpc_acados_custom_update"(nlp_solver_capsule* capsule, double * data, int data_len)
 
-    acados_solver_common.ocp_nlp_in *acados_get_nlp_in "pypose_mpc_alloc_tv_acados_get_nlp_in"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_out *acados_get_nlp_out "pypose_mpc_alloc_tv_acados_get_nlp_out"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_out *acados_get_sens_out "pypose_mpc_alloc_tv_acados_get_sens_out"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_solver *acados_get_nlp_solver "pypose_mpc_alloc_tv_acados_get_nlp_solver"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_config *acados_get_nlp_config "pypose_mpc_alloc_tv_acados_get_nlp_config"(nlp_solver_capsule * capsule)
-    void *acados_get_nlp_opts "pypose_mpc_alloc_tv_acados_get_nlp_opts"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_dims *acados_get_nlp_dims "pypose_mpc_alloc_tv_acados_get_nlp_dims"(nlp_solver_capsule * capsule)
-    acados_solver_common.ocp_nlp_plan *acados_get_nlp_plan "pypose_mpc_alloc_tv_acados_get_nlp_plan"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_in *acados_get_nlp_in "bluerov_cylinder_orbit_mpc_acados_get_nlp_in"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_out *acados_get_nlp_out "bluerov_cylinder_orbit_mpc_acados_get_nlp_out"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_out *acados_get_sens_out "bluerov_cylinder_orbit_mpc_acados_get_sens_out"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_solver *acados_get_nlp_solver "bluerov_cylinder_orbit_mpc_acados_get_nlp_solver"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_config *acados_get_nlp_config "bluerov_cylinder_orbit_mpc_acados_get_nlp_config"(nlp_solver_capsule * capsule)
+    void *acados_get_nlp_opts "bluerov_cylinder_orbit_mpc_acados_get_nlp_opts"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_dims *acados_get_nlp_dims "bluerov_cylinder_orbit_mpc_acados_get_nlp_dims"(nlp_solver_capsule * capsule)
+    acados_solver_common.ocp_nlp_plan *acados_get_nlp_plan "bluerov_cylinder_orbit_mpc_acados_get_nlp_plan"(nlp_solver_capsule * capsule)

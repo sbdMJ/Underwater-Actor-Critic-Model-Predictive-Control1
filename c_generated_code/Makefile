@@ -39,35 +39,38 @@
 # model
 MODEL_SRC=
 
-MODEL_SRC+= pypose_mpc_alloc_tv_model/pypose_mpc_alloc_tv_dyn_disc_phi_fun.c
-MODEL_SRC+= pypose_mpc_alloc_tv_model/pypose_mpc_alloc_tv_dyn_disc_phi_fun_jac.c
-MODEL_SRC+= pypose_mpc_alloc_tv_model/pypose_mpc_alloc_tv_dyn_disc_phi_fun_jac_hess.c
-MODEL_SRC+= pypose_mpc_alloc_tv_model/pypose_mpc_alloc_tv_dyn_disc_phi_jac_p_hess_xu_p.c
+MODEL_SRC+= bluerov_cylinder_orbit_mpc_model/bluerov_cylinder_orbit_mpc_expl_ode_fun.c
+MODEL_SRC+= bluerov_cylinder_orbit_mpc_model/bluerov_cylinder_orbit_mpc_expl_vde_forw.c
+MODEL_SRC+= bluerov_cylinder_orbit_mpc_model/bluerov_cylinder_orbit_mpc_expl_vde_adj.c
 
 MODEL_OBJ := $(MODEL_SRC:.c=.o)
 # optimal control problem - mostly CasADi exports
 OCP_SRC=
 
 
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_0_fun.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_0_fun_jac_hess.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_0_fun_jac.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_0_hess_xu_p.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_fun.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_fun_jac_hess.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_fun_jac.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_hess_xu_p.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_e_fun.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_e_fun_jac_hess.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_e_fun_jac.c
-OCP_SRC+= pypose_mpc_alloc_tv_cost/pypose_mpc_alloc_tv_cost_ext_cost_e_hess_xu_p.c
-OCP_SRC+= ./pypose_mpc_alloc_tv_p_global_precompute_fun.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_0_fun.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_0_fun_jac_ut_xt.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_0_hess.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_fun.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_fun_jac_ut_xt.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_hess.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_e_fun.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_e_fun_jac_ut_xt.c
+OCP_SRC+= bluerov_cylinder_orbit_mpc_cost/bluerov_cylinder_orbit_mpc_cost_y_e_hess.c
 
-OCP_SRC+= acados_solver_pypose_mpc_alloc_tv.c
+OCP_SRC+= acados_solver_bluerov_cylinder_orbit_mpc.c
 
 OCP_OBJ := $(OCP_SRC:.c=.o)
+# for sim solver
+SIM_SRC= acados_sim_solver_bluerov_cylinder_orbit_mpc.c
+SIM_OBJ := $(SIM_SRC:.c=.o)
+
+# for target example_sim
+EX_SIM_SRC= main_sim_bluerov_cylinder_orbit_mpc.c
+EX_SIM_OBJ := $(EX_SIM_SRC:.c=.o)
+EX_SIM_EXE := $(EX_SIM_SRC:.c=)
 # for target example
-EX_SRC= main_pypose_mpc_alloc_tv.c
+EX_SRC= main_bluerov_cylinder_orbit_mpc.c
 EX_OBJ := $(EX_SRC:.c=.o)
 EX_EXE := $(EX_SRC:.c=)
 
@@ -75,6 +78,7 @@ EX_EXE := $(EX_SRC:.c=)
 # combine model, (potentially) sim and ocp object files
 OBJ=
 OBJ+= $(MODEL_OBJ)
+OBJ+= $(SIM_OBJ)
 OBJ+= $(OCP_OBJ)
 
 EXTERNAL_DIR=
@@ -108,19 +112,25 @@ LDLIBS+= -lm
 LDLIBS+= 
 
 # libraries
-LIBACADOS_SOLVER=libacados_solver_pypose_mpc_alloc_tv.so
-LIBACADOS_OCP_SOLVER=libacados_ocp_solver_pypose_mpc_alloc_tv.so
+LIBACADOS_SOLVER=libacados_solver_bluerov_cylinder_orbit_mpc.so
+LIBACADOS_OCP_SOLVER=libacados_ocp_solver_bluerov_cylinder_orbit_mpc.so
+LIBACADOS_SIM_SOLVER=lib$(SIM_SRC:.c=.so)
 
 # virtual targets
 .PHONY : all clean
-all: clean example
-shared_lib: ocp_shared_lib
+
+	all: clean example_sim example
+shared_lib: bundled_shared_lib ocp_shared_lib sim_shared_lib
 
 # some linker targets
 example: $(EX_OBJ) $(OBJ)
 	$(CC) $^ -o $(EX_EXE) $(LDFLAGS) $(LDLIBS)
 
+example_sim: $(EX_SIM_OBJ) $(MODEL_OBJ) $(SIM_OBJ)
+	$(CC) $^ -o $(EX_SIM_EXE) $(LDFLAGS) $(LDLIBS)
 
+sim_shared_lib: $(SIM_OBJ) $(MODEL_OBJ)
+	$(CC) -shared $^ -o $(LIBACADOS_SIM_SOLVER) $(LDFLAGS) $(LDLIBS)
 bundled_shared_lib: $(OBJ)
 	$(CC) -shared $^ -o $(LIBACADOS_SOLVER) $(LDFLAGS) $(LDLIBS)
 
@@ -154,24 +164,54 @@ ocp_cython: ocp_cython_o
 	-o acados_ocp_solver_pyx.so \
 	-Wl,-rpath=$(LIB_PATH) \
 	acados_ocp_solver_pyx.o \
-	$(abspath .)/libacados_ocp_solver_pypose_mpc_alloc_tv.so \
+	$(abspath .)/libacados_ocp_solver_bluerov_cylinder_orbit_mpc.so \
 	$(LDFLAGS) $(LDLIBS)
 
 
+# Sim Cython targets
+sim_cython_c: sim_shared_lib
+	cython \
+	-o acados_sim_solver_pyx.c \
+	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
+	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_sim_solver_pyx.pyx \
+	-I /home/mjkim/MarineGym/c_generated_code \
 
+sim_cython_o: sim_cython_c
+	$(CC) $(ACADOS_FLAGS) -c -O2 \
+	-fPIC \
+	-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION \
+	-o acados_sim_solver_pyx.o \
+	-I $(INCLUDE_PATH)/blasfeo/include/ \
+	-I $(INCLUDE_PATH)/hpipm/include/ \
+	-I $(INCLUDE_PATH) \
+	-I /home/mjkim/isaac410/kit/exts/omni.kit.pip_archive/pip_prebundle/numpy/core/include \
+	-I /home/mjkim/isaac410/kit/python/include/python3.10 \
+	acados_sim_solver_pyx.c \
+
+sim_cython: sim_cython_o
+	$(CC) $(ACADOS_FLAGS) -shared \
+	-o acados_sim_solver_pyx.so \
+	-Wl,-rpath=$(LIB_PATH) \
+	acados_sim_solver_pyx.o \
+	$(abspath .)/libacados_sim_solver_bluerov_cylinder_orbit_mpc.so \
+	$(LDFLAGS) $(LDLIBS)
 
 clean:
-	$(RM) $(OBJ) $(EX_OBJ)
-	$(RM) $(LIBACADOS_SOLVER) $(LIBACADOS_OCP_SOLVER)
-	$(RM) $(EX_EXE)
+	$(RM) $(OBJ) $(EX_OBJ) $(EX_SIM_OBJ)
+	$(RM) $(LIBACADOS_SOLVER) $(LIBACADOS_OCP_SOLVER) $(LIBACADOS_SIM_SOLVER)
+	$(RM) $(EX_EXE) $(EX_SIM_EXE)
 clean_ocp_shared_lib:
 	$(RM) $(LIBACADOS_OCP_SOLVER)
 	$(RM) $(OCP_OBJ)
 
 clean_ocp_cython:
-	$(RM) libacados_ocp_solver_pypose_mpc_alloc_tv.so
-	$(RM) acados_solver_pypose_mpc_alloc_tv.o
+	$(RM) libacados_ocp_solver_bluerov_cylinder_orbit_mpc.so
+	$(RM) acados_solver_bluerov_cylinder_orbit_mpc.o
 	$(RM) acados_ocp_solver_pyx.so
 	$(RM) acados_ocp_solver_pyx.o
 
-
+clean_sim_cython:
+	$(RM) libacados_sim_solver_bluerov_cylinder_orbit_mpc.so
+	$(RM) acados_sim_solver_bluerov_cylinder_orbit_mpc.o
+	$(RM) acados_sim_solver_pyx.so
+	$(RM) acados_sim_solver_pyx.o

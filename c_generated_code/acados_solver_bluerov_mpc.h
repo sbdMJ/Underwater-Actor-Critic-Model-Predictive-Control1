@@ -38,12 +38,12 @@
 
 #define BLUEROV_MPC_NX     13
 #define BLUEROV_MPC_NZ     0
-#define BLUEROV_MPC_NU     6
+#define BLUEROV_MPC_NU     8
 #define BLUEROV_MPC_NP     0
 #define BLUEROV_MPC_NP_GLOBAL     0
 #define BLUEROV_MPC_NBX    0
 #define BLUEROV_MPC_NBX0   13
-#define BLUEROV_MPC_NBU    6
+#define BLUEROV_MPC_NBU    8
 #define BLUEROV_MPC_NSBX   0
 #define BLUEROV_MPC_NSBU   0
 #define BLUEROV_MPC_NSH    0
@@ -61,10 +61,10 @@
 #define BLUEROV_MPC_NG     0
 #define BLUEROV_MPC_NBXN   0
 #define BLUEROV_MPC_NGN    0
-#define BLUEROV_MPC_NY0    19
-#define BLUEROV_MPC_NY     19
+#define BLUEROV_MPC_NY0    21
+#define BLUEROV_MPC_NY     21
 #define BLUEROV_MPC_NYN    13
-#define BLUEROV_MPC_N      20
+#define BLUEROV_MPC_N      10
 #define BLUEROV_MPC_NH     0
 #define BLUEROV_MPC_NHN    0
 #define BLUEROV_MPC_NH0    0

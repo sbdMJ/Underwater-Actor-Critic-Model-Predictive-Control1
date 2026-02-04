@@ -10,14 +10,14 @@ env:
   num_envs: 1
   env_spacing: 6
   # 1 episode = 1 lap (orbit_period_steps)
-  max_episode_length: 1800
+  max_episode_length: 6000
 
 # PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
 # reset 시 PhysX 에러로 시뮬이 종료될 수 있어, MPC 태스크 기본은 CPU pipeline로 둡니다.
 sim:
-  device: cpu
-  use_gpu_pipeline: false
-  use_gpu: false
+  device: cuda:0
+  use_gpu_pipeline: true
+  use_gpu: true
 
 drone_model:
   name: BlueROV
@@ -29,9 +29,15 @@ time_encoding: true
 reward_effort_weight: 0.1
 reward_action_smoothness_weight: 0.0
 reward_distance_scale: 1.2
+# Reward mode:
+#   - hover: Hover-style reward to a target (auto -> moving waypoint when use_internal_mpc=false)
+#   - orbit_cost: cylinder-orbit cost based reward (radial/z/tangent/heading/roll/pitch/wxy + effort)
+reward_mode: orbit_cost
+# Scaling for orbit_cost reward: reward_orbit = 1 / (1 + scale * cost)
+reward_orbit_cost_scale: 1.0
 
 # Cylinder-aware MPC 설정
-mpc_horizon: 20
+mpc_horizon: 5
 mpc_r_u: 0.01
 mpc_q_radial: 50.0
 mpc_q_z: 30.0
@@ -55,12 +61,51 @@ cylinder:
 orbit_clearance: 1.0
 orbit_radius: 1.4
 orbit_z: 1.5
-orbit_period_steps: 600
+orbit_period_steps: 300
 orbit_direction: 1.0  # +1: CCW, -1: CW
 orbit_yaw_offset: 0.0
 hide_target_vis: true
 # desired tangential speed (m/s). If 0, controller uses 2*pi*R/(orbit_period_steps*dt)
-orbit_v_tan: 0.0
+orbit_v_tan: 1.5
+
+# Target (used in Hover-style obs/reward):
+#   - auto: waypoint when use_internal_mpc=false else center
+#   - center: fixed at cylinder_center
+#   - waypoint: moving waypoint on the orbit (good for PPO waypoint tracking)
+orbit_target_mode: auto
+
+# If true, append (cylinder_center - target_pos) to observation (3 dims).
+# Useful when the target is a moving waypoint but the policy/MPC needs access to the cylinder center.
+include_cylinder_rel_in_obs: false
+
+# Optional: use PyPose differentiable MPC(iLQR) instead of the cylinder-aware acados controller.
+# `pypose_orbit_mode`:
+#   - waypoint: orbit 위 moving waypoint를 추종 (기본; 빠르게 "도는" 동작이 나오기 쉬움)
+#   - cylinder_cost: `CylinderOrbitMPCController`와 동일한 cost(radial/tangent/heading/roll/pitch/wxy + effort)
+use_pypose_mpc: true
+pypose_orbit_mode: cylinder_cost
+pypose_orbit_waypoint_lookahead_steps: 20
+pypose_mpc_horizon: 3
+pypose_mpc_ilqr_iters: 2
+pypose_mpc_ilqr_reg: 1e-3
+pypose_mpc_terminal_weight_mult: 10.0
+# If unset, falls back to mpc_max_thruster_force.
+pypose_max_thruster_force: 40.0
+
+# Waypoint-mode cost weights (PyPoseMPCController diag)
+pypose_wp_mpc_q_pos: 50.0
+pypose_wp_mpc_q_quat: 30.0
+pypose_wp_mpc_q_vel: 2.0
+pypose_wp_mpc_q_omega: 0.5
+pypose_wp_mpc_r_u: 0.01
+
+# PPO + PyPose MPC(algo=ppo_pypose_mpc_qrdiag_tv) init defaults (scripts/train.py uses these keys)
+mpc_ilqr_iters: 2
+mpc_q_pos: 50.0
+mpc_q_quat: 30.0
+mpc_q_vel: 2.0
+mpc_q_omega: 0.5
+max_thruster_force: 40.0
 
 # Spawn near the orbit (helps MPC converge quickly)
 random_target_pos: false
@@ -75,3 +120,8 @@ terminate_distance: 10.0
 terminate_min_z: 0.1
 
 action_transform: null
+
+# If true, the env overwrites RL actions with its own MPC output each step.
+# For RL training with `algo=ppo_pypose_mpc_qrdiag`, `algo=ppo_pypose_mpc_qrdiag_tv`,
+# or `algo=ppo_pypose_mpc_qrconst`, set this to false (or override via Hydra).
+use_internal_mpc: true

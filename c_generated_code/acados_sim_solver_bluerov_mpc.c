@@ -181,16 +181,16 @@ int bluerov_mpc_acados_sim_create(bluerov_mpc_sim_solver_capsule * capsule)
 
 
     // u
-    double u0[6];
-    for (int ii = 0; ii < 6; ii++)
+    double u0[8];
+    for (int ii = 0; ii < 8; ii++)
         u0[ii] = 0.0;
 
     sim_in_set(bluerov_mpc_sim_config, bluerov_mpc_sim_dims,
                bluerov_mpc_sim_in, "u", u0);
 
     // S_forw
-    double S_forw[247];
-    for (int ii = 0; ii < 247; ii++)
+    double S_forw[273];
+    for (int ii = 0; ii < 273; ii++)
         S_forw[ii] = 0.0;
     for (int ii = 0; ii < 13; ii++)
         S_forw[ii + ii * 13 ] = 1.0;

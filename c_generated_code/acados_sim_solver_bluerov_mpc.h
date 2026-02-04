@@ -36,7 +36,7 @@
 
 #define BLUEROV_MPC_NX     13
 #define BLUEROV_MPC_NZ     0
-#define BLUEROV_MPC_NU     6
+#define BLUEROV_MPC_NU     8
 #define BLUEROV_MPC_NP     0
 
 #ifdef __cplusplus

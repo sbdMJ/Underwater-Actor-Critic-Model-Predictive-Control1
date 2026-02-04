@@ -1,0 +1,60 @@
+name: HoverMPC
+
+defaults:
+  # see https://hydra.cc/docs/advanced/overriding_packages/
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 1
+  env_spacing: 6
+  max_episode_length: 400
+
+# PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
+# reset 시 PhysX 에러로 시뮬이 종료될 수 있어, HoverMPC 기본은 CPU pipeline로 둡니다.
+sim:
+  device: cpu
+  use_gpu_pipeline: false
+  use_gpu: false
+
+drone_model:
+  name: BlueROVHeavy
+  controller: MPCController
+
+force_sensor: false
+time_encoding: true
+
+reward_effort_weight: 0.1
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# HoverMPC 전용 설정
+mpc_horizon: 10
+mpc_q_pos: 20.0
+mpc_q_vel: 2.0
+mpc_q_omega: 0.5
+mpc_r_u: 0.05
+max_thruster_force: 15.0
+thrust_axis: 0
+# mpc_debug_print_B: true
+
+# 디버깅: 먼저 hover 유지부터 (target 고정)
+random_target_pos: false
+random_target_yaw: false
+
+# 초기 자세도 고정(뒤집힘/랜덤 yaw로 MPC가 헤매는 것 방지)
+init_pose_mode: absolute
+init_rpy_min: [0.0, 0.0, 0.0]
+init_rpy_max: [0.0, 0.0, 0.0]
+
+# MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
+terminate_distance: 10.0
+terminate_min_z: 0.1
+
+action_transform: null
+
+# If true, the env overwrites RL actions with its own MPC output each step.
+# For RL training with diff-MPC actors, set this to false (or override via Hydra).
+use_internal_mpc: true

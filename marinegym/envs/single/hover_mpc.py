@@ -28,20 +28,55 @@ class HoverMPC(Hover):
         inertia_xx, inertia_yy, inertia_zz = self.drone.INERTIA_0.squeeze().tolist()
 
         thrust_axis = int(self.cfg.task.get("thrust_axis", 0))
-        if "thruster_allocation" in self.drone.params:
+        B_src = "computed"
+        if getattr(self.drone, "thruster_allocation", None) is not None:
+            B = np.asarray(self.drone.thruster_allocation.detach().cpu().numpy(), dtype=np.float64)
+            B_src = "drone.thruster_allocation"
+        elif "thruster_allocation" in self.drone.params:
             B = np.asarray(self.drone.params["thruster_allocation"], dtype=np.float64)
+            B_src = "drone.params.thruster_allocation"
         else:
             B = compute_thruster_allocation_matrix_from_drone(self.drone, thrust_axis=thrust_axis)
+
+        # --- Model parameter alignment ---
+        # rho/volume: simulation may run in neutral-buoyancy mode (buoyancy cancels weight exactly).
+        # Align MPC buoyancy with the sim by setting volume = mass/rho in that case.
+        rho = float(self.drone.params.get("rho", self.drone.params.get("water_density", 997.0)))
+        volume = float(self.drone.params.get("volume", 0.0))
+        buoy_mode = str(self.drone.params.get("buoyancy_mode", "volume")).lower()
+        if buoy_mode in ("neutral", "neutral_mass", "match_weight") and rho > 0.0:
+            volume = float(mass / rho)
+
+        # If sim hydrodynamics are disabled, keep MPC model consistent by zeroing hydro terms.
+        hydro_coef = self.drone.params["hydro_coef"]
+        if bool(self.drone.params.get("disable_hydrodynamics", False)):
+            hydro_coef = {
+                "added_mass": [0.0] * 6,
+                "linear_damping": [0.0] * 6,
+                "quadratic_damping": [0.0] * 6,
+            }
+
+        # MPC 모델은 coBM이 body Z축 방향이라고 가정합니다. 환경(시뮬)에서 cobm_axis가 다른 경우,
+        # MPC 내부 모델과 토크 방향이 어긋날 수 있어 기본값은 0으로 둡니다(override 가능).
+        coBM = float(self.drone.params.get("coBM", 0.0))
+        try:
+            axis = getattr(self.drone, "_cobm_axis_unit", None)
+            if axis is not None:
+                axis = axis.detach().cpu().numpy().reshape(-1)
+                if axis.shape[0] == 3 and not (abs(float(axis[0])) < 1e-3 and abs(float(axis[1])) < 1e-3 and float(axis[2]) > 0.999):
+                    coBM = 0.0
+        except Exception:
+            pass
 
         uav_params = {
             "name": self.cfg.task.drone_model.name,
             "mass": mass,
             "inertia": {"xx": inertia_xx, "yy": inertia_yy, "zz": inertia_zz},
-            "hydro_coef": self.drone.params["hydro_coef"],
+            "hydro_coef": hydro_coef,
             "thruster_allocation": B,
-            "volume": float(self.drone.params.get("volume", 0.0)),
-            "coBM": float(self.drone.params.get("coBM", 0.0)),
-            "rho": float(self.drone.params.get("rho", 997.0)),
+            "volume": volume,
+            "coBM": coBM,
+            "rho": rho,
             "mpc_q_pos": float(self.cfg.task.get("mpc_q_pos", 50.0)),
             "mpc_q_quat": float(self.cfg.task.get("mpc_q_quat", 5.0)),
             "mpc_q_vel": float(self.cfg.task.get("mpc_q_vel", 2.0)),
@@ -49,6 +84,7 @@ class HoverMPC(Hover):
             "mpc_q_roll": float(self.cfg.task.get("mpc_q_roll", 0.0)),
             "mpc_q_pitch": float(self.cfg.task.get("mpc_q_pitch", 0.0)),
             "mpc_r_u": float(self.cfg.task.get("mpc_r_u", 0.01)),
+            "max_thruster_force": float(self.cfg.task.get("max_thruster_force", 40.0)),
         }
 
         horizon = int(self.cfg.task.get("mpc_horizon", 20))
@@ -58,6 +94,7 @@ class HoverMPC(Hover):
         if bool(self.cfg.task.get("mpc_debug_print_B", False)):
             np.set_printoptions(precision=3, suppress=True)
             print("[HoverMPC] thrust_axis:", thrust_axis)
+            print("[HoverMPC] B source:", B_src)
             print("[HoverMPC] B (6 x n):\n", B)
 
     def _pre_sim_step(self, tensordict):

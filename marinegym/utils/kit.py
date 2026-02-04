@@ -254,9 +254,32 @@ def set_articulation_properties(
     """
     # get articulation USD prim
     articulation_prim = prim_utils.get_prim_at_path(prim_path)
+    if not articulation_prim.IsValid():
+        raise ValueError(f"Invalid prim path '{prim_path}'.")
     # check if prim has articulation applied on it
     if not UsdPhysics.ArticulationRootAPI(articulation_prim):
-        raise ValueError(f"No articulation schema present for prim '{prim_path}'.")
+        # Try to apply the API on the provided prim first. This allows users to spawn a container
+        # prim (that references a USD with a nested articulation root) and still treat the container
+        # as the articulation root.
+        try:
+            UsdPhysics.ArticulationRootAPI.Apply(articulation_prim)
+        except Exception:
+            pass
+
+    if not UsdPhysics.ArticulationRootAPI(articulation_prim):
+        # Fallback: find a nested articulation root under the given prim path.
+        queue = [articulation_prim]
+        found = None
+        while queue and found is None:
+            prim = queue.pop(0)
+            for child in prim_utils.get_prim_children(prim):
+                queue.append(child)
+                if UsdPhysics.ArticulationRootAPI(child):
+                    found = child
+                    break
+        if found is None:
+            raise ValueError(f"No articulation schema present for prim '{prim_path}'.")
+        articulation_prim = found
     # retrieve the articulation api
     physx_articulation_api = PhysxSchema.PhysxArticulationAPI(articulation_prim)
     if not physx_articulation_api:

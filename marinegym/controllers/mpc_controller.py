@@ -222,7 +222,7 @@ def setup_acados_ocp(uav_params, dt=0.05, N=20):
     ocp.cost.yref_e = np.zeros(Q.shape[0])
 
     # --- Constraints ---
-    max_thruster_force = 40.0 # From T200 specs (approx)
+    max_thruster_force = float(uav_params.get("max_thruster_force", 40.0))  # From T200 specs (approx)
     ocp.constraints.lbu = np.array([-max_thruster_force] * nu)
     ocp.constraints.ubu = np.array([max_thruster_force] * nu)
     ocp.constraints.idxbu = np.arange(nu)
@@ -260,7 +260,7 @@ class MPCController(ControllerBase):
         # --- Thruster model constants ---
         # Approximate force = k_f * command^2 or k_f * command for normalized commands
         # For simplicity, we assume solver outputs force, and we convert it to a [-1, 1] command
-        self.max_force_per_thruster = 40.0 # Newtons
+        self.max_force_per_thruster = float(uav_params.get("max_thruster_force", 40.0))  # Newtons
         
         # --- References ---
         self._yref = np.zeros(self.ny, dtype=np.float64)

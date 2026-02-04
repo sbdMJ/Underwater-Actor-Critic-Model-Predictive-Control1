@@ -64,6 +64,7 @@ def main(cfg):
         "ppo_pypose_mpc_qrdiag",
         "ppo_pypose_mpc_qrconst",
         "ppo_pypose_mpc_qrdiag_tv",
+        "ppo_pypose_cylinder_mpc_werr_wu_tv",
         "ppo_acados_pypose_mpc_qrdiag_tv",
         "ppo_acados_hover_mpc_qrdiag",
     ):
@@ -188,6 +189,87 @@ def main(cfg):
 
             if not cfg.algo.get("wu_init", None):
                 r_u = float(cfg.task.get("mpc_r_u", 0.02))
+                cfg.algo.wu_init = [r_u] * int(cfg.algo.mpc_nu)
+
+        if algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
+            # Orbit-cylinder cost weights (w_err, w_u) for a differentiable PyPose iLQR MPC.
+            cfg.algo.mpc_horizon = int(
+                cfg.task.get("pypose_mpc_horizon", cfg.task.get("mpc_horizon", cfg.algo.get("mpc_horizon", 15)))
+            )
+            cfg.algo.mpc_ilqr_iters = int(
+                cfg.task.get(
+                    "pypose_mpc_ilqr_iters",
+                    cfg.task.get("mpc_ilqr_iters", cfg.algo.get("mpc_ilqr_iters", 6)),
+                )
+            )
+            cfg.algo.mpc_ilqr_reg = float(cfg.task.get("pypose_mpc_ilqr_reg", cfg.algo.get("mpc_ilqr_reg", 1e-3)))
+            cfg.algo.terminal_weight_mult = float(
+                cfg.task.get("pypose_mpc_terminal_weight_mult", cfg.algo.get("terminal_weight_mult", 10.0))
+            )
+            cfg.algo.max_thruster_force = float(
+                cfg.task.get(
+                    "pypose_max_thruster_force",
+                    cfg.task.get(
+                        "mpc_max_thruster_force",
+                        cfg.task.get("max_thruster_force", cfg.algo.get("max_thruster_force", 40.0)),
+                    ),
+                )
+            )
+
+            cfg.algo.orbit_radius = float(cfg.task.get("orbit_radius", cfg.algo.get("orbit_radius", 1.4)))
+            cfg.algo.orbit_direction = 1.0 if float(cfg.task.get("orbit_direction", 1.0)) >= 0.0 else -1.0
+            cfg.algo.orbit_yaw_offset = float(cfg.task.get("orbit_yaw_offset", 0.0))
+
+            orbit_v_tan = float(cfg.task.get("orbit_v_tan", 0.0))
+            if orbit_v_tan <= 0.0:
+                orbit_period_steps = int(cfg.task.get("orbit_period_steps", cfg.task.get("max_episode_length", 1)))
+                dt = float(cfg.sim.dt)
+                r = float(cfg.algo.orbit_radius)
+                orbit_v_tan = float(2.0 * np.pi * r / (max(1, orbit_period_steps) * dt)) if r > 1e-6 else 0.0
+            cfg.algo.orbit_v_tan = float(orbit_v_tan)
+
+            # The actor uses target-at-origin coordinates from Hover obs (pos_rel = drone_pos - target_pos).
+            # If the target is the moving waypoint (OrbitCylinderMPC auto mode + use_internal_mpc=false),
+            # then z in that relative frame should be 0 because target_z == orbit_z.
+            orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
+            if orbit_target_mode in ("auto", ""):
+                reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
+                if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+                    orbit_target_mode = "center"
+                else:
+                    orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
+            if orbit_target_mode in ("waypoint", "moving_waypoint", "wp"):
+                cfg.algo.orbit_z = 0.0
+            else:
+                center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
+                cfg.algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
+
+            cfg.algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+
+            if not cfg.algo.get("werr_init", None):
+                q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
+                q_z = float(cfg.task.get("mpc_q_z", 30.0))
+                q_tan = float(cfg.task.get("mpc_q_tan", 10.0))
+                q_radial_speed = float(cfg.task.get("mpc_q_radial_speed", 5.0))
+                q_heading = float(cfg.task.get("mpc_q_heading", 30.0))
+                q_roll = float(cfg.task.get("mpc_q_roll", 60.0))
+                q_pitch = float(cfg.task.get("mpc_q_pitch", 60.0))
+                q_wxy = float(cfg.task.get("mpc_q_wxy", 0.5))
+                cfg.algo.werr_init = [
+                    q_radial,
+                    q_z,
+                    q_tan,
+                    q_radial_speed,
+                    q_heading,
+                    q_heading,
+                    q_roll,
+                    q_pitch,
+                    q_wxy,
+                    q_wxy,
+                ]
+
+            if not cfg.algo.get("wu_init", None):
+                r_u = float(cfg.task.get("mpc_r_u", 0.01))
                 cfg.algo.wu_init = [r_u] * int(cfg.algo.mpc_nu)
 
         if algo_name == "ppo_pypose_mpc_qrconst":

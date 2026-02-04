@@ -8,7 +8,7 @@ from omni.isaac.core.utils.viewports import set_camera_view
 from marinegym.envs.isaac_env import AgentSpec, IsaacEnv
 from marinegym.views import ArticulationView, RigidPrimView
 from marinegym.utils.torch import euler_to_quaternion, quat_axis
-from marinegym.utils.torch import quat_rotate
+from marinegym.utils.torch import quat_rotate, quat_mul
 
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
@@ -55,8 +55,9 @@ class Hover(IsaacEnv):
             )
             self.payload.initialize()
 
-        target_view_cls = ArticulationView if self.drone.is_articulation else XFormPrimView
-        self.target_vis = target_view_cls(
+        # Target visualization is just a marker prim; do not wrap as an ArticulationView even if
+        # the drone itself is an articulation.
+        self.target_vis = XFormPrimView(
             "/World/envs/env_*/target",
             reset_xform_properties=False
         )
@@ -195,25 +196,59 @@ class Hover(IsaacEnv):
     def _design_scene(self):
         import marinegym.utils.kit as kit_utils
         import omni.isaac.core.utils.prims as prim_utils
+        from pxr import UsdGeom
 
         drone_model_cfg = self.cfg.task.drone_model
+        is_articulation = drone_model_cfg.get("is_articulation", None)
+        if isinstance(is_articulation, str):
+            low = is_articulation.strip().lower()
+            if low in ("true", "1", "yes", "y", "t"):
+                is_articulation = True
+            elif low in ("false", "0", "no", "n", "f"):
+                is_articulation = False
+            else:
+                raise ValueError(f"task.drone_model.is_articulation must be bool. got {is_articulation!r}")
+        if is_articulation is None:
+            # BlueROVHeavy는 (USD에 articulation root가 있다면) articulation로 스폰하는 편이
+            # /{robot_root}/... 형태의 prim 구조를 유지하기 쉽습니다.
+            if str(drone_model_cfg.name) in ("BlueROVHeavy", "bluerovheavy"):
+                is_articulation = True
         self.drone, self.controller = UnderwaterVehicle.make(
-            drone_model_cfg.name, drone_model_cfg.controller
+            drone_model_cfg.name,
+            drone_model_cfg.controller,
+            is_articulation=is_articulation,
         )
         
-        target_vis_prim = prim_utils.create_prim(
+        # Target visualization: use a simple marker prim (not a full robot USD) so it is always visible
+        # and does not inherit complex physics/instancing behaviors.
+        target_root = prim_utils.create_prim(
             prim_path="/World/envs/env_0/target",
-            usd_path=self.drone.fixed_usd_path,
-            translation=(0.0, 0.0, 2.),
+            prim_type="Xform",
+            translation=(0.0, 0.0, 2.0),
         )
+        marker_path = "/World/envs/env_0/target/marker"
+        marker = prim_utils.create_prim(
+            prim_path=marker_path,
+            prim_type="Sphere",
+            translation=(0.0, 0.0, 0.0),
+            attributes={"radius": float(self.cfg.task.get("target_marker_radius", 0.10))},
+        )
+        try:
+            gprim = UsdGeom.Gprim(marker)
+            if gprim and gprim.GetPrim().IsValid():
+                # Bright red marker.
+                gprim.CreateDisplayColorAttr().Set([(1.0, 0.1, 0.1)])
+        except Exception:
+            pass
 
         kit_utils.set_nested_collision_properties(
-            target_vis_prim.GetPath(),
+            target_root.GetPath(),
             collision_enabled=False
         )
         kit_utils.set_nested_rigid_body_properties(
-            target_vis_prim.GetPath(),
-            disable_gravity=True
+            target_root.GetPath(),
+            rigid_body_enabled=False,
+            disable_gravity=True,
         )
 
         drone_prim = self.drone.spawn(translations=[(0.0, 0.0, 2.)])[0]
@@ -232,6 +267,9 @@ class Hover(IsaacEnv):
         if self.cfg.task.time_encoding:
             self.time_encoding_dim = 4
             observation_dim += self.time_encoding_dim
+        # Optional: append (cylinder_center - target_pos) for cylinder-orbit tasks.
+        if bool(self.cfg.task.get("include_cylinder_rel_in_obs", False)):
+            observation_dim += 3
 
         self.observation_spec = CompositeSpec({
             "agents": CompositeSpec({
@@ -276,12 +314,65 @@ class Hover(IsaacEnv):
 
         pos = self.init_pos_dist.sample((*env_ids.shape, 1))
         rpy = self.init_rpy_dist.sample((*env_ids.shape, 1))
-        rot = euler_to_quaternion(rpy)
+        rot_delta = euler_to_quaternion(rpy)
+
+        # Optional model-specific rotation offset (in multiples of pi, like init_rpy_*).
+        # Use this to correct assets that are authored with a different up-axis (e.g., -90deg around X).
+        model_rpy_offset_cfg = self.cfg.task.get("model_rpy_offset", None)
+        if model_rpy_offset_cfg is None:
+            model_rpy_offset_cfg = getattr(self.drone, "model_rpy_offset_pi", [0.0, 0.0, 0.0])
+        model_rpy_offset = torch.tensor(model_rpy_offset_cfg, device=self.device, dtype=rpy.dtype) * torch.pi
+        rot_offset = euler_to_quaternion(model_rpy_offset.view(1, 1, 3)).expand_as(rot_delta)
+
+        init_pose_mode = str(self.cfg.task.get("init_pose_mode", "absolute")).strip().lower()
+        if init_pose_mode not in ("absolute", "delta_usd"):
+            raise ValueError(f"task.init_pose_mode must be 'absolute' or 'delta_usd'. got {init_pose_mode!r}")
+
+        # Base orientation captured right after spawn (USD-authored transform).
+        base_rot = None
+        if init_pose_mode == "delta_usd":
+            try:
+                _, base_rot_all = self.init_poses
+                base_rot = base_rot_all[env_ids]
+            except Exception:
+                base_rot = None
+
+        if base_rot is not None and base_rot.shape == rot_delta.shape:
+            rot = quat_mul(base_rot, quat_mul(rot_offset, rot_delta))
+        else:
+            rot = quat_mul(rot_offset, rot_delta)
+
+        # Some assets (notably BlueROVHeavy) can appear upside-down if their local-up axis is inverted
+        # relative to the simulator's world-up. If the current orientation makes the body +Z point
+        # downward, flip 180deg around the body X axis to restore uprightness.
+        if str(self.cfg.task.drone_model.name) in ("BlueROVHeavy", "bluerovheavy"):
+            up_w = quat_axis(rot.squeeze(1), axis=2).unsqueeze(1)
+            inverted = up_w[..., 2] < 0.0
+            if bool(inverted.any()):
+                flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=self.device, dtype=rot.dtype).view(1, 1, 4)
+                rot_flipped = quat_mul(rot, flip.expand_as(rot))
+                rot = torch.where(inverted.unsqueeze(-1), rot_flipped, rot)
         self.drone.set_world_poses(
             pos + self.envs_positions[env_ids].unsqueeze(1), rot, env_ids
         )
         self.drone.set_velocities(self.init_vels[env_ids], env_ids)
         self._update_viewer_follow_camera()
+
+        if bool(self.cfg.task.get("debug_init_pose", False)) and not getattr(self, "_debug_init_pose_printed", False):
+            try:
+                env0 = int(env_ids[0].item())
+                print(
+                    "[Hover] init_pose debug:",
+                    f"init_pose_mode={init_pose_mode}",
+                    f"model_rpy_offset(pi)={model_rpy_offset_cfg}",
+                    f"sampled_rpy(pi)={(rpy[0,0] / torch.pi).detach().cpu().tolist()}",
+                )
+                if base_rot is not None:
+                    print(f"[Hover] base_rot(wxyz)={base_rot[0,0].detach().cpu().tolist()}")
+                print(f"[Hover] final_rot(wxyz)={rot[0,0].detach().cpu().tolist()}")
+            except Exception:
+                pass
+            self._debug_init_pose_printed = True
 
         if self.enable_payload:
             payload_z = self.payload_z_dist.sample(env_ids.shape)

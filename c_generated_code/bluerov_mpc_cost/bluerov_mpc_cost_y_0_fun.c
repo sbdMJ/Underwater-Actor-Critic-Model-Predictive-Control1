@@ -52,12 +52,12 @@ extern "C" {
 #endif
 
 static const casadi_int casadi_s0[3] = {13, 1, 1};
-static const casadi_int casadi_s1[3] = {6, 1, 1};
+static const casadi_int casadi_s1[3] = {8, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
 static const casadi_int casadi_s3[3] = {0, 0, 1};
-static const casadi_int casadi_s4[3] = {19, 1, 1};
+static const casadi_int casadi_s4[3] = {21, 1, 1};
 
-/* bluerov_mpc_cost_y_0_fun:(i0[13],i1[6],i2[0],i3[],i4[0])->(o0[19]) */
+/* bluerov_mpc_cost_y_0_fun:(i0[13],i1[8],i2[0],i3[],i4[0])->(o0[21]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a0;
   a0=arg[0]? arg[0][0] : 0;
@@ -98,6 +98,10 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   if (res[0]!=0) res[0][17]=a0;
   a0=arg[1]? arg[1][5] : 0;
   if (res[0]!=0) res[0][18]=a0;
+  a0=arg[1]? arg[1][6] : 0;
+  if (res[0]!=0) res[0][19]=a0;
+  a0=arg[1]? arg[1][7] : 0;
+  if (res[0]!=0) res[0][20]=a0;
   return 0;
 }
 

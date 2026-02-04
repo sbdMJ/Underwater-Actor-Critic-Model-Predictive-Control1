@@ -22,14 +22,38 @@ save_interval: -1
 seed: 0
 
 # scripts/test_pypose_mpc.py overrides (Hydra strict mode friendly)
-mpc_test_steps: 300
+mpc_test_steps: 5000
 ppo_test_steps: 32
 mpc_alloc_path: /tmp/marinegym/pypose_mpc_thruster_alloc.npz
+
+# scripts/test_sequential_rotors.py defaults (Hydra strict mode friendly)
+rotor_test_duration_s: 5.0
+rotor_test_throttle: 0.5
+rotor_test_rest_s: 1.0
+rotor_test_print_alloc: false
+rotor_test_debug_wrench: false
+rotor_test_print_rotor_axes: false
+rotor_test_debug_wz: false
+rotor_test_mode: sequential
+rotor_test_indices: null
+
+# scripts/spawn_hover.py defaults (Hydra strict mode friendly)
+spawn_duration_s: 5.0
 
 viewer:
   resolution: [2460, 1440]
   eye: [8, 0., 6.]
   lookat: [0., 0., 3.]
+
+# Paper-friendly experiment logging (used by scripts/test_mpc_withCam.py).
+exp_log:
+  enable: false
+  out_dir: ${oc.env:MARINEGYM_ROOT}/outputs/experiment_logs
+  run_name: ""
+  save_npz: true
+  save_csv: false
+  plot: true
+  plot_num_points: 200
 
 wandb:
   group: ${oc.select:..task.name}

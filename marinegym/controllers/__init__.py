@@ -35,6 +35,11 @@ except Exception:
     pass
 
 try:  # pragma: no cover
+    from .pypose_cylinder_orbit_mpc_controller import PyPoseCylinderOrbitMPCController  # noqa: F401
+except Exception:
+    pass
+
+try:  # pragma: no cover
     from .mpc_pytorch_controller import MPCPyTorchController  # noqa: F401
 except Exception:
     pass

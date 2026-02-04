@@ -174,7 +174,7 @@ class PyPoseMPCController(ControllerBase):
         dt: float = 0.05,
         horizon: int = 20,
         batch_size: int = 1,
-        ilqr_iters: int = 6,
+        ilqr_iters: int = 2,
         ilqr_reg: float = 1e-3,
         terminal_weight_mult: float = 10.0,
         max_thruster_force: float = 40.0,

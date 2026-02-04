@@ -41,3 +41,19 @@ init_pos_min: [-2.5, -2.5, 1.5]
 init_pos_max: [2.5, 2.5, 2.5]
 init_rpy_min: [-0.2, -0.2, 0.0]
 init_rpy_max: [0.2, 0.2, 2.0]
+
+# Optional model-specific orientation offset (multiples of pi).
+# If null, falls back to the robot model YAML's `model_rpy_offset` (or [0,0,0] if absent).
+# Example: -90deg around X => [-0.5, 0, 0]
+model_rpy_offset: null
+
+# Initial pose application mode:
+# - absolute: init_rpy_* defines world orientation directly (default)
+# - delta_usd: init_rpy_* is applied as a delta on top of the USD-authored base rotation
+init_pose_mode: absolute
+
+# Debug prints for initial pose sampling and application.
+debug_init_pose: false
+
+# Target marker visualization
+target_marker_radius: 0.10

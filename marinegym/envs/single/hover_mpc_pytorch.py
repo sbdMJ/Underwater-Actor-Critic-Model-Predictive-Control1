@@ -26,20 +26,49 @@ class HoverMPCPyTorch(Hover):
         inertia_xx, inertia_yy, inertia_zz = self.drone.INERTIA_0.squeeze().tolist()
 
         thrust_axis = int(self.cfg.task.get("thrust_axis", 0))
-        if "thruster_allocation" in self.drone.params:
+        B_src = "computed"
+        if getattr(self.drone, "thruster_allocation", None) is not None:
+            B = np.asarray(self.drone.thruster_allocation.detach().cpu().numpy(), dtype=np.float64)
+            B_src = "drone.thruster_allocation"
+        elif "thruster_allocation" in self.drone.params:
             B = np.asarray(self.drone.params["thruster_allocation"], dtype=np.float64)
+            B_src = "drone.params.thruster_allocation"
         else:
             B = compute_thruster_allocation_matrix_from_drone(self.drone, thrust_axis=thrust_axis)
+
+        rho = float(self.drone.params.get("rho", self.drone.params.get("water_density", 997.0)))
+        volume = float(self.drone.params.get("volume", 0.0))
+        buoy_mode = str(self.drone.params.get("buoyancy_mode", "volume")).lower()
+        if buoy_mode in ("neutral", "neutral_mass", "match_weight") and rho > 0.0:
+            volume = float(mass / rho)
+
+        hydro_coef = self.drone.params["hydro_coef"]
+        if bool(self.drone.params.get("disable_hydrodynamics", False)):
+            hydro_coef = {
+                "added_mass": [0.0] * 6,
+                "linear_damping": [0.0] * 6,
+                "quadratic_damping": [0.0] * 6,
+            }
+
+        coBM = float(self.drone.params.get("coBM", 0.0))
+        try:
+            axis = getattr(self.drone, "_cobm_axis_unit", None)
+            if axis is not None:
+                axis = axis.detach().cpu().numpy().reshape(-1)
+                if axis.shape[0] == 3 and not (abs(float(axis[0])) < 1e-3 and abs(float(axis[1])) < 1e-3 and float(axis[2]) > 0.999):
+                    coBM = 0.0
+        except Exception:
+            pass
 
         uav_params = {
             "name": self.cfg.task.drone_model.name,
             "mass": mass,
             "inertia": {"xx": inertia_xx, "yy": inertia_yy, "zz": inertia_zz},
-            "hydro_coef": self.drone.params["hydro_coef"],
+            "hydro_coef": hydro_coef,
             "thruster_allocation": B,
-            "volume": float(self.drone.params.get("volume", 0.0)),
-            "coBM": float(self.drone.params.get("coBM", 0.0)),
-            "rho": float(self.drone.params.get("rho", 997.0)),
+            "volume": volume,
+            "coBM": coBM,
+            "rho": rho,
             "g": 9.81,
             "mpc_q_pos": float(self.cfg.task.get("mpc_q_pos", 50.0)),
             "mpc_q_quat": float(self.cfg.task.get("mpc_q_quat", 5.0)),
@@ -76,6 +105,7 @@ class HoverMPCPyTorch(Hover):
         if bool(self.cfg.task.get("mpc_debug_print_B", False)):
             np.set_printoptions(precision=3, suppress=True)
             print("[HoverMPCPyTorch] thrust_axis:", thrust_axis)
+            print("[HoverMPCPyTorch] B source:", B_src)
             print("[HoverMPCPyTorch] B (6 x n):\n", B)
 
     def _pre_sim_step(self, tensordict):
