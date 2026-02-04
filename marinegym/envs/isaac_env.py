@@ -37,7 +37,7 @@ from omni.isaac.core.utils.extensions import enable_extension
 from omni.isaac.core.utils.viewports import set_camera_view
 
 from tensordict.tensordict import TensorDict, TensorDictBase
-from torchrl.data import CompositeSpec, TensorSpec, DiscreteTensorSpec
+from marinegym.utils.torchrl.specs import CompositeSpec, TensorSpec, DiscreteTensorSpec
 from torchrl.envs import EnvBase
 
 from marinegym.robots.robot import RobotBase

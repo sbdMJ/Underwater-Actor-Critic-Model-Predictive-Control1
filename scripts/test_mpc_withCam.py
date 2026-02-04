@@ -90,16 +90,16 @@ def main(cfg):
     MPC 기반 HoverMPC 환경이 실제로 step을 돌 수 있는지 확인하는 간단한 스모크 테스트.
 
     예)
-      python scripts/test_mpc_withCam.py task=Hover_MPC headless=false enable_livestream=false env.num_envs=1
+      python scripts/test_mpc_withCam.py task=Hover_MPC headless=true enable_livestream=true env.num_envs=1
       python scripts/test_mpc_withCam.py task=Hover_MPC camera.capture_interval=60
 
-      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 +camera.head_offset='[0.4,0,0.15]'
+      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=true enable_livestream=true env.num_envs=1 +camera.head_offset='[0.4,0,0.15]'
 
       # 1바퀴(2π)마다 orbit_z를 조금씩 내려가며 여러 바퀴(나선형) 돌기
-      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 +layered_orbit.enable=true +layered_orbit.delta_z=0.05 +layered_orbit.laps=5 +layered_orbit.transition_steps=60
+      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=true enable_livestream=true env.num_envs=1 +layered_orbit.enable=true +layered_orbit.delta_z=0.05 +layered_orbit.laps=5 +layered_orbit.transition_steps=60
 
       # 1바퀴 도는거 diffMPC (pypose)
-      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 task.use_pypose_mpc=true +camera.head_offset='[0.4,0,0.15]' task.pypose_orbit_mode=cylinder_cost
+      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=true enable_livestream=true env.num_envs=1 task.use_pypose_mpc=true +camera.head_offset='[0.4,0,0.15]' task.pypose_orbit_mode=cylinder_cost
 
     """
     OmegaConf.register_new_resolver("eval", eval)

@@ -56,6 +56,23 @@ GUI로 확인할 때는 env 수를 줄여서 실행하세요:
 python scripts/train.py task=PathFollow algo=ppo env.num_envs=1 headless=false enable_livestream=false max_iters=50 total_frames=200000
 ```
 
+## Troubleshooting
+
+### Livestream starts but reports capture device initialization errors
+If you see log lines like `Stream Server: Net Stream Creation failed` or
+`Couldn't initialize the capture device`, the WebRTC server started but could not
+open a rendering capture device. This typically points to a missing or
+misconfigured GPU/Vulkan stack inside the container or VM, so validate that
+Vulkan can enumerate the NVIDIA GPU and that the driver libraries are visible
+inside the container before retrying livestream.  
+
+### ImportError: `DiscreteTensorSpec` missing from `torchrl.data`
+Isaac Sim ships with a TorchRL build that can differ from upstream. If you see
+`ImportError: cannot import name 'DiscreteTensorSpec' from 'torchrl.data'`,
+use the compatibility shim in `marinegym.utils.torchrl.specs` (and update any
+direct imports) so the project can fall back to the spec implementation bundled
+with TorchRL.  
+
 
 ## Citation
 

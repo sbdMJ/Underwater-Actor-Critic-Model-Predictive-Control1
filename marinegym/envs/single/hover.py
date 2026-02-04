@@ -11,7 +11,11 @@ from marinegym.utils.torch import euler_to_quaternion, quat_axis
 from marinegym.utils.torch import quat_rotate, quat_mul
 
 from tensordict.tensordict import TensorDict, TensorDictBase
-from torchrl.data import UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
+from marinegym.utils.torchrl.specs import (
+    CompositeSpec,
+    DiscreteTensorSpec,
+    UnboundedContinuousTensorSpec,
+)
 
 from marinegym.robots.drone import UnderwaterVehicle
 

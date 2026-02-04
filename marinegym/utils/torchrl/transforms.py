@@ -25,7 +25,6 @@ from typing import Any, Dict, Optional, Sequence, Union, Tuple
 
 import torch
 from tensordict.tensordict import TensorDictBase, TensorDict
-from torchrl.data.tensor_specs import TensorSpec
 from torchrl.envs.common import EnvBase
 from torchrl.envs.transforms import (
     TransformedEnv,
@@ -34,13 +33,13 @@ from torchrl.envs.transforms import (
     FlattenObservation,
     CatTensors
 )
-from torchrl.data import (
-    TensorSpec,
+from marinegym.utils.torchrl.specs import (
     BoundedTensorSpec,
-    UnboundedContinuousTensorSpec,
+    CompositeSpec,
     DiscreteTensorSpec,
     MultiDiscreteTensorSpec,
-    CompositeSpec,
+    TensorSpec,
+    UnboundedContinuousTensorSpec,
 )
 from .env import AgentSpec
 from dataclasses import replace
@@ -334,4 +333,3 @@ class History(Transform):
                 item_history = tensordict.get(out_key)
                 item_history[_reset] = 0.
         return tensordict
-

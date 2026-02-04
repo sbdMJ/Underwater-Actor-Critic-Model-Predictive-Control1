@@ -5,7 +5,7 @@ hydra:
     # MARINEGYM_ROOT is set by entry scripts based on this repo's location.
     - file://${oc.env:MARINEGYM_ROOT}/cfg
 
-headless: false
+headless: true
 enable_livestream: true
 mode: train
 
