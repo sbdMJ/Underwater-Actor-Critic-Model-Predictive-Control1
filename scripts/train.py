@@ -46,6 +46,9 @@ def main(cfg):
     OmegaConf.register_new_resolver("eval", eval)
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+    if str(cfg.task.name) == "OrbitCylinderMPC" and str(cfg.algo.name).lower() == "ppo":
+        cfg.task.control_mode = "direct"
+        cfg.task.use_internal_mpc = False
     simulation_app = init_simulation_app(cfg)
     run = init_wandb(cfg)
     setproctitle(run.name)
