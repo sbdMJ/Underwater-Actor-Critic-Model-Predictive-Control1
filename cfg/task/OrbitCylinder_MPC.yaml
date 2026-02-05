@@ -11,6 +11,7 @@ env:
   env_spacing: 6
   # 1 episode = 1 lap (orbit_period_steps)
   max_episode_length: 12000
+  current_range: 0.05
 
 # PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
 # reset 시 PhysX 에러로 시뮬이 종료될 수 있어, MPC 태스크 기본은 CPU pipeline로 둡니다.

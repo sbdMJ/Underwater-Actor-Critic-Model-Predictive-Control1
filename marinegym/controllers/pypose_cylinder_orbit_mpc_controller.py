@@ -361,6 +361,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         u_init: torch.Tensor,
         w_err_seq: torch.Tensor | None = None,
         w_u_seq: torch.Tensor | None = None,
+        gamma_d: torch.Tensor | None = None,
+        x_meas_seq: torch.Tensor | None = None,
     ) -> torch.Tensor:
         try:
             from torch.func import jacrev, vmap  # type: ignore
@@ -424,8 +426,22 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 raise ValueError(f"w_u_seq must have shape ({B},{T},{nu}). got {tuple(w_u_seq.shape)}")
             w_u_seq = w_u_seq * float(self.max_thruster_force**2)
 
+        gamma_d_b = None
+        if gamma_d is not None:
+            gamma_d_b = torch.as_tensor(gamma_d, dtype=dtype, device=device).reshape(-1)
+            if gamma_d_b.numel() == 1 and B > 1:
+                gamma_d_b = gamma_d_b.expand(B)
+            if gamma_d_b.numel() != B:
+                raise ValueError(f"gamma_d must have shape ({B},) or scalar. got {tuple(gamma_d_b.shape)}")
+
         for _ in range(self.ilqr_iters):
             x_traj = self._rollout(x0, u)  # (B, T+1, nx)
+            if x_meas_seq is None:
+                x_meas_traj = x_traj
+            else:
+                x_meas_traj = x_meas_seq.to(device=device, dtype=dtype)
+                if x_meas_traj.shape != x_traj.shape:
+                    raise ValueError(f"x_meas_seq must have shape {tuple(x_traj.shape)}. got {tuple(x_meas_traj.shape)}")
 
             # dynamics jacobians
             A_list = []
@@ -471,6 +487,24 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             l_xx = torch.einsum("btex,bte,btey->btxy", Je_traj, w_err_b, Je_traj)
             l_u = w_u_b * u
             l_uu = torch.diag_embed(w_u_b)  # (B, T, nu, nu)
+            l_ux = torch.zeros(B, T, nu, self.nx, device=device, dtype=dtype)
+
+            if gamma_d_b is not None:
+                dt = float(self.dt)
+                for t in range(T):
+                    x_next_pred = x_traj[:, t + 1, :]
+                    x_next_meas = x_meas_traj[:, t + 1, :]
+                    d_hat = (x_next_pred - x_next_meas)[:, :3] / dt
+                    weighted_d = gamma_d_b.view(B, 1) * d_hat
+
+                    Jx_pos = A[:, t, :3, :] / dt
+                    Ju_pos = Bu[:, t, :3, :] / dt
+
+                    l_x[:, t, :] = l_x[:, t, :] + torch.einsum("bix,bi->bx", Jx_pos, weighted_d)
+                    l_u[:, t, :] = l_u[:, t, :] + torch.einsum("biu,bi->bu", Ju_pos, weighted_d)
+                    l_xx[:, t, :, :] = l_xx[:, t, :, :] + torch.einsum("bix,biy->bxy", Jx_pos, Jx_pos) * gamma_d_b.view(B, 1, 1)
+                    l_uu[:, t, :, :] = l_uu[:, t, :, :] + torch.einsum("biu,biv->buv", Ju_pos, Ju_pos) * gamma_d_b.view(B, 1, 1)
+                    l_ux[:, t, :, :] = torch.einsum("biu,bix->bux", Ju_pos, Jx_pos) * gamma_d_b.view(B, 1, 1)
 
             # terminal derivatives
             if w_err_T.ndim == 1:
@@ -490,7 +524,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 Q_u = l_u[:, t, :] + torch.einsum("bik,bk->bi", Bt.transpose(-1, -2), V_x)
 
                 Q_xx = l_xx[:, t, :, :] + At.transpose(-1, -2) @ V_xx @ At
-                Q_ux = Bt.transpose(-1, -2) @ V_xx @ At
+                Q_ux = l_ux[:, t, :, :] + Bt.transpose(-1, -2) @ V_xx @ At
                 Q_uu = l_uu[:, t, :, :] + Bt.transpose(-1, -2) @ V_xx @ Bt
 
                 Q_uu_reg = Q_uu + self.ilqr_reg * Iu
@@ -540,6 +574,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         yaw_offset: float = 0.0,
         w_err_seq: torch.Tensor | None = None,
         w_u_seq: torch.Tensor | None = None,
+        gamma_d: torch.Tensor | None = None,
+        x_meas_seq: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x0 = root_state.reshape(-1, root_state.shape[-1])
         c = center_w.reshape(-1, center_w.shape[-1])
@@ -571,6 +607,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             u_init=u_init,
             w_err_seq=w_err_seq,
             w_u_seq=w_u_seq,
+            gamma_d=gamma_d,
+            x_meas_seq=x_meas_seq,
         )
         self._u_warm = torch.cat([u_traj[:, 1:, :], torch.zeros_like(u_traj[:, :1, :])], dim=1).detach()
 

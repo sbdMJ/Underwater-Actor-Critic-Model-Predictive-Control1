@@ -36,6 +36,8 @@ class OrbitCylinderMPC(HoverMPC):
 
         super().__init__(cfg, headless)
 
+        self.current_vel = torch.zeros(self.num_envs, 3, device=self.device)
+
         orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
         if orbit_target_mode in ("auto", ""):
             # For RL training (use_internal_mpc=false):
@@ -183,6 +185,19 @@ class OrbitCylinderMPC(HoverMPC):
 
     def _reset_idx(self, env_ids: torch.Tensor):
         super()._reset_idx(env_ids)
+        current_range = float(self.cfg.env.get("current_range", 0.0))
+        if self.training and current_range > 0.0:
+            self.current_vel[env_ids] = torch.empty((env_ids.numel(), 3), device=self.device).uniform_(
+                -current_range,
+                current_range,
+            )
+        else:
+            self.current_vel[env_ids] = 0.0
+        if hasattr(self, "drone") and hasattr(self.drone, "flow_vels"):
+            self.drone.flow_vels[env_ids, 0, :3] = self.current_vel[env_ids].to(
+                dtype=self.drone.flow_vels.dtype
+            )
+            self.drone.flow_vels[env_ids, 0, 3:] = 0.0
         # Initialize orbit phase so the moving waypoint starts near the current spawn pose.
         try:
             self.drone.get_state()
