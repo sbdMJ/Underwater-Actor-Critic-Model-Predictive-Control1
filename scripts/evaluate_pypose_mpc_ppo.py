@@ -15,6 +15,7 @@ from marinegym.learning import ALGOS  # noqa: F401  (Hydra ConfigStore 등록용
 # ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/home/mjkim/MarineGym/wandb/offline-run-20260121_150344-p0j9ggir/files/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200 mode=evaluate
 # ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_mpc_qrdiag_tv +task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000
 
+# ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv task.reward_mode=orbit_cost task.orbit_target_mode=auto task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false headless=false enable_livestream=false env.num_envs=1 mode=evaluate +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000 +eval.print_every=200 +eval.print_weights_every=200 +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
 
 
 FILE_PATH = os.path.dirname(__file__)

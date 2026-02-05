@@ -83,7 +83,7 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     # Learnable diagonal cost bounds.
     werr_lb: float = 1e-3
     werr_ub: float = 1e3
-    wu_lb: float = 1e-4
+    wu_lb: float = 1e-3
     wu_ub: float = 1.0
     weights_log_scale: bool = True
     cost_hidden: int = 256

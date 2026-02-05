@@ -67,6 +67,26 @@ class OrbitCylinderMPC(HoverMPC):
         # Waypoint-mode phase (initialized on reset): theta0 per env.
         self._orbit_theta0 = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
 
+        # Optional termination: if the vehicle stays nearly stationary (XY) for too long.
+        # Useful to avoid "do nothing" local optima (e.g., earning only the effort reward).
+        self.terminate_stationary_enable = bool(cfg.task.get("terminate_stationary_enable", False))
+        self.terminate_stationary_xy_eps = float(cfg.task.get("terminate_stationary_xy_eps", 0.0))
+        self.terminate_stationary_steps = int(cfg.task.get("terminate_stationary_steps", 0))
+        self.terminate_stationary_grace_steps = int(cfg.task.get("terminate_stationary_grace_steps", 0))
+        if (
+            self.terminate_stationary_enable
+            and self.terminate_stationary_steps > 0
+            and self.terminate_stationary_xy_eps > 0.0
+        ):
+            self._stationary_steps_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
+            self._stationary_prev_xy = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
+
+        # Optional reward shaping: penalize large actions more when orbit tracking is already good.
+        # This gives the policy an incentive to increase learned w_u (r_u) in steady-state.
+        self.reward_action_mag_weight = float(cfg.task.get("reward_action_mag_weight", 0.0))
+        self.reward_action_mag_scale = float(cfg.task.get("reward_action_mag_scale", 1.0))
+        self.reward_action_mag_gate_by_orbit = bool(cfg.task.get("reward_action_mag_gate_by_orbit", True))
+
     @staticmethod
     def _is_waypoint_mode(mode: str) -> bool:
         return str(mode).lower() in ("waypoint", "moving_waypoint", "wp")
@@ -172,6 +192,23 @@ class OrbitCylinderMPC(HoverMPC):
             self._orbit_theta0[env_ids] = torch.atan2(rel[:, 1], rel[:, 0]).to(dtype=torch.float32)
         except Exception:
             self._orbit_theta0[env_ids] = 0.0
+
+        # Reset stationary-termination buffers.
+        if (
+            getattr(self, "terminate_stationary_enable", False)
+            and hasattr(self, "_stationary_steps_buf")
+            and hasattr(self, "_stationary_prev_xy")
+        ):
+            try:
+                self.drone.get_state()
+                pos_xy = self.drone.pos[env_ids].squeeze(1)[:, 0:2]  # (E, 2)
+                self._stationary_steps_buf[env_ids] = 0
+                self._stationary_prev_xy[env_ids].copy_(pos_xy.to(dtype=self._stationary_prev_xy.dtype))
+            except Exception:
+                try:
+                    self._stationary_steps_buf[env_ids] = 0
+                except Exception:
+                    pass
 
         if self._is_waypoint_mode(getattr(self, "orbit_target_mode", "center")):
             # IsaacEnv resets progress_buf after _reset_idx; ensure t=0 here for correct initial waypoint.
@@ -311,6 +348,25 @@ class OrbitCylinderMPC(HoverMPC):
         reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
         reward = reward_orbit + reward_effort + reward_action_smoothness  # (E, 1)
 
+        # Extra action-magnitude reward term (optional).
+        if self.reward_action_mag_weight != 0.0 and self.reward_action_mag_scale > 0.0:
+            try:
+                u_cmd = getattr(self, "_last_action_cmd", None)
+                if u_cmd is None:
+                    u_cmd = getattr(self.drone, "throttle", None)
+                if u_cmd is not None:
+                    # u_cmd: (E,1,nu) or (E,nu)
+                    if u_cmd.ndim >= 3:
+                        u_cmd = u_cmd.squeeze(1)
+                    u_mag = torch.mean(torch.abs(u_cmd), dim=-1, keepdim=True)  # (E, 1)
+                    gate = reward_orbit if bool(self.reward_action_mag_gate_by_orbit) else 1.0
+                    reward_action_mag = float(self.reward_action_mag_weight) * gate * torch.exp(
+                        -float(self.reward_action_mag_scale) * u_mag
+                    )
+                    reward = reward + reward_action_mag
+            except Exception:
+                pass
+
         # Termination: keep Hover's rules (z floor, far-away, NaN, timeout).
         try:
             distance = torch.norm(torch.cat([self.rpos, self.rheading], dim=-1), dim=-1)
@@ -322,6 +378,36 @@ class OrbitCylinderMPC(HoverMPC):
 
         terminated = misbehave | hasnan
         truncated = (self.progress_buf >= self.max_episode_length).unsqueeze(-1)
+
+        # Optional: terminate if the vehicle is (almost) stationary for too long.
+        if (
+            getattr(self, "terminate_stationary_enable", False)
+            and hasattr(self, "_stationary_steps_buf")
+            and hasattr(self, "_stationary_prev_xy")
+            and int(getattr(self, "terminate_stationary_steps", 0)) > 0
+            and float(getattr(self, "terminate_stationary_xy_eps", 0.0)) > 0.0
+        ):
+            try:
+                pos_xy = root_state[:, 0:2]  # (E, 2)
+                prev_xy = self._stationary_prev_xy.to(device=pos_xy.device, dtype=pos_xy.dtype)
+                delta_xy = torch.linalg.norm(pos_xy - prev_xy, dim=-1)  # (E,)
+                # Update prev before early returns (stability across steps).
+                self._stationary_prev_xy.copy_(pos_xy.to(dtype=self._stationary_prev_xy.dtype))
+
+                grace = int(getattr(self, "terminate_stationary_grace_steps", 0))
+                if grace > 0:
+                    active = self.progress_buf >= float(grace)
+                else:
+                    active = torch.ones_like(delta_xy, dtype=torch.bool, device=delta_xy.device)
+
+                still = active & (delta_xy < float(self.terminate_stationary_xy_eps))
+                self._stationary_steps_buf[still] += 1
+                self._stationary_steps_buf[~still] = 0
+
+                stuck = (self._stationary_steps_buf >= int(self.terminate_stationary_steps)).view(self.num_envs, 1)
+                terminated = terminated | stuck
+            except Exception:
+                pass
 
         radial_err = torch.abs(e[:, 0]).view(self.num_envs, 1)
         heading_err = e[:, 4:6]
@@ -348,6 +434,10 @@ class OrbitCylinderMPC(HoverMPC):
 
     def _pre_sim_step(self, tensordict):
         if not getattr(self, "_use_internal_mpc", True):
+            try:
+                self._last_action_cmd = tensordict[("agents", "action")].detach()
+            except Exception:
+                pass
             return super()._pre_sim_step(tensordict)
 
         # 최신 상태 업데이트(자세/속도 포함)
@@ -384,6 +474,10 @@ class OrbitCylinderMPC(HoverMPC):
 
                 cmds = self.controller.compute(root_state, target_pos, target_quat=target_quat).unsqueeze(1)
                 tensordict.set(("agents", "action"), cmds)
+                try:
+                    self._last_action_cmd = cmds.detach()
+                except Exception:
+                    pass
                 self.effort = torch.abs(self.drone.apply_action(cmds))
                 return
 
@@ -398,6 +492,10 @@ class OrbitCylinderMPC(HoverMPC):
                 yaw_offset=self.orbit_yaw_offset,
             ).unsqueeze(1)
             tensordict.set(("agents", "action"), cmds)
+            try:
+                self._last_action_cmd = cmds.detach()
+            except Exception:
+                pass
             self.effort = torch.abs(self.drone.apply_action(cmds))
             return
 
@@ -415,6 +513,10 @@ class OrbitCylinderMPC(HoverMPC):
             yaw_offset=self.orbit_yaw_offset,
         ).unsqueeze(1)
         tensordict.set(("agents", "action"), cmds)
+        try:
+            self._last_action_cmd = cmds.detach()
+        except Exception:
+            pass
         self.effort = torch.abs(self.drone.apply_action(cmds))
 
     def _init_controller(self):

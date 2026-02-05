@@ -15,7 +15,7 @@ env:
   env_spacing: ${task.env.env_spacing}
   max_episode_length: ${task.env.max_episode_length}
 
-total_frames: 3_000_000 #20_000_000
+total_frames: 10_000_000 #20_000_000
 max_iters: -1
 eval_interval: -1
 save_interval: -1
@@ -54,6 +54,8 @@ exp_log:
   save_csv: false
   plot: true
   plot_num_points: 200
+  flush_interval_steps: 0  # 0 disables periodic saving
+  flush_plot: false  # save plot on each flush
 
 wandb:
   group: ${oc.select:..task.name}

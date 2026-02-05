@@ -35,6 +35,45 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
+def _coerce_np_array(
+    x,
+    *,
+    shape: tuple[int, ...],
+    dtype,
+    fill_value=0,
+) -> np.ndarray:
+    out = np.full(shape, fill_value=fill_value, dtype=dtype)
+    if x is None:
+        return out
+    try:
+        arr = np.asarray(_to_numpy(x), dtype=dtype)
+        arr = np.squeeze(arr)
+        return arr.reshape(shape)
+    except Exception:
+        try:
+            flat = np.asarray(_to_numpy(x)).reshape(-1)
+            flat = flat.astype(dtype, copy=False)
+        except Exception:
+            return out
+        out_flat = out.reshape(-1)
+        n = int(min(out_flat.size, flat.size))
+        if n > 0:
+            out_flat[:n] = flat[:n]
+        return out
+
+
+def _atomic_replace(src_path: Path, dst_path: Path) -> None:
+    try:
+        os.replace(str(src_path), str(dst_path))
+    except Exception:
+        try:
+            if dst_path.exists():
+                dst_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        os.rename(str(src_path), str(dst_path))
+
+
 def _maybe_import_orbit_errors():
     try:
         from marinegym.controllers.pypose_cylinder_orbit_mpc_controller import _orbit_errors  # noqa: WPS433
@@ -93,7 +132,7 @@ def main(cfg):
       python scripts/test_mpc_withCam.py task=Hover_MPC headless=false enable_livestream=false env.num_envs=1
       python scripts/test_mpc_withCam.py task=Hover_MPC camera.capture_interval=60
 
-      ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 +camera.head_offset='[0.4,0,0.15]'
+      ~/isaac410/python.sh scripts/test_mpc_withCam.py   task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1   task.use_pypose_mpc=false   +camera.head_offset='[0.4,0,0.15]'
 
       # 1바퀴(2π)마다 orbit_z를 조금씩 내려가며 여러 바퀴(나선형) 돌기
       ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 +layered_orbit.enable=true +layered_orbit.delta_z=0.05 +layered_orbit.laps=5 +layered_orbit.transition_steps=60
@@ -242,11 +281,161 @@ def main(cfg):
         exp_log_enable = bool(exp_log_cfg.get("enable", False))
         exp_log_out_dir: Path | None = None
         exp_log_buffers: dict | None = None
+        exp_log_n_envs: int | None = None
+        exp_log_nu: int | None = None
         ep_id: torch.Tensor | None = None
         ep_len: torch.Tensor | None = None
         ep_ends: list[_EpisodeEnd] = []
 
         orbit_errors_fn = _maybe_import_orbit_errors() if exp_log_enable else None
+
+        def _save_exp_buffers(*, do_plot: bool) -> None:
+            if exp_log_out_dir is None or exp_log_buffers is None or exp_log_n_envs is None or exp_log_nu is None:
+                return
+
+            n_envs = int(exp_log_n_envs)
+            nu_local = int(exp_log_nu)
+            T = int(len(exp_log_buffers.get("step", [])))
+
+            if T <= 0:
+                step_arr = np.zeros((0,), dtype=np.int64)
+                ep_arr = np.zeros((0, n_envs), dtype=np.int64)
+                x_arr = np.zeros((0, n_envs, 13), dtype=np.float32)
+                u_arr = np.zeros((0, n_envs, nu_local), dtype=np.float32)
+                e_arr = np.zeros((0, n_envs, 10), dtype=np.float32)
+                cost_arr = np.zeros((0, n_envs), dtype=np.float32)
+                done_arr = np.zeros((0, n_envs), dtype=np.bool_)
+                term_arr = np.zeros((0, n_envs), dtype=np.bool_)
+                trunc_arr = np.zeros((0, n_envs), dtype=np.bool_)
+                succ_arr = np.zeros((0, n_envs), dtype=np.bool_)
+                fail_arr = np.zeros((0, n_envs), dtype=np.bool_)
+            else:
+                keys = [
+                    "episode_id",
+                    "x",
+                    "u",
+                    "orbit_err",
+                    "cost",
+                    "done",
+                    "terminated",
+                    "truncated",
+                    "success",
+                    "failure",
+                ]
+                for k in keys:
+                    T = min(T, int(len(exp_log_buffers.get(k, []))))
+
+                step_arr = np.asarray(exp_log_buffers["step"][:T], dtype=np.int64)
+                ep_arr = np.stack(exp_log_buffers["episode_id"][:T], axis=0).astype(np.int64, copy=False)  # (T,E)
+                x_arr = np.stack(exp_log_buffers["x"][:T], axis=0).astype(np.float32, copy=False)  # (T,E,13)
+                u_arr = np.stack(exp_log_buffers["u"][:T], axis=0).astype(np.float32, copy=False)  # (T,E,nu)
+                e_arr = np.stack(exp_log_buffers["orbit_err"][:T], axis=0).astype(np.float32, copy=False)  # (T,E,10)
+                cost_arr = np.stack(exp_log_buffers["cost"][:T], axis=0).astype(np.float32, copy=False)  # (T,E)
+                done_arr = np.stack(exp_log_buffers["done"][:T], axis=0).astype(np.bool_, copy=False)
+                term_arr = np.stack(exp_log_buffers["terminated"][:T], axis=0).astype(np.bool_, copy=False)
+                trunc_arr = np.stack(exp_log_buffers["truncated"][:T], axis=0).astype(np.bool_, copy=False)
+                succ_arr = np.stack(exp_log_buffers["success"][:T], axis=0).astype(np.bool_, copy=False)
+                fail_arr = np.stack(exp_log_buffers["failure"][:T], axis=0).astype(np.bool_, copy=False)
+
+            meta = {
+                "seed": int(seed),
+                "dt": float(cfg.sim.dt),
+                "substeps": int(cfg.sim.substeps),
+                "max_episode_length": int(cfg.env.max_episode_length),
+                "orbit_radius": float(getattr(base_env, "orbit_radius", 0.0)),
+                "orbit_z": float(getattr(base_env, "orbit_z", 0.0)),
+                "orbit_v_tan": float(getattr(base_env, "orbit_v_tan", 0.0)),
+                "orbit_direction": float(getattr(base_env, "orbit_direction", 1.0)),
+                "orbit_yaw_offset": float(getattr(base_env, "orbit_yaw_offset", 0.0)),
+                "cylinder_center": _to_numpy(getattr(base_env, "cylinder_center", torch.zeros(1, 1, 3)))
+                .reshape(-1)
+                .tolist(),
+                "cylinder_radius": float(getattr(base_env, "cylinder_radius", 0.0)),
+                "cylinder_height": float(getattr(base_env, "cylinder_height", 0.0)),
+                "mpc_q": {
+                    "radial": float(cfg.task.get("mpc_q_radial", 0.0)),
+                    "z": float(cfg.task.get("mpc_q_z", 0.0)),
+                    "tan": float(cfg.task.get("mpc_q_tan", 0.0)),
+                    "radial_speed": float(cfg.task.get("mpc_q_radial_speed", 0.0)),
+                    "heading": float(cfg.task.get("mpc_q_heading", 0.0)),
+                    "roll": float(cfg.task.get("mpc_q_roll", 0.0)),
+                    "pitch": float(cfg.task.get("mpc_q_pitch", 0.0)),
+                    "wxy": float(cfg.task.get("mpc_q_wxy", 0.0)),
+                },
+                "mpc_r_u": float(cfg.task.get("mpc_r_u", 0.0)),
+            }
+
+            if bool(exp_log_cfg.get("save_npz", True)):
+                tmp_npz = exp_log_out_dir / "rollout_tmp.npz"
+                np.savez_compressed(
+                    tmp_npz,
+                    step=step_arr,
+                    episode_id=ep_arr,
+                    x=x_arr,
+                    u=u_arr,
+                    orbit_err=e_arr,
+                    cost=cost_arr,
+                    done=done_arr,
+                    terminated=term_arr,
+                    truncated=trunc_arr,
+                    success=succ_arr,
+                    failure=fail_arr,
+                    meta=np.array([meta], dtype=object),
+                )
+                _atomic_replace(tmp_npz, exp_log_out_dir / "rollout.npz")
+
+            if bool(exp_log_cfg.get("save_csv", False)) and T > 0:
+                import pandas as pd  # noqa: WPS433
+
+                rows = []
+                for ti in range(int(x_arr.shape[0])):
+                    for ei in range(int(x_arr.shape[1])):
+                        rows.append(
+                            {
+                                "t": int(step_arr[ti]),
+                                "env": int(ei),
+                                "episode_id": int(ep_arr[ti, ei]),
+                                "x": float(x_arr[ti, ei, 0]),
+                                "y": float(x_arr[ti, ei, 1]),
+                                "z": float(x_arr[ti, ei, 2]),
+                                "cost": float(cost_arr[ti, ei]),
+                                "done": bool(done_arr[ti, ei]),
+                                "terminated": bool(term_arr[ti, ei]),
+                                "truncated": bool(trunc_arr[ti, ei]),
+                                "success": bool(succ_arr[ti, ei]),
+                                "failure": bool(fail_arr[ti, ei]),
+                            }
+                        )
+                tmp_csv = exp_log_out_dir / "rollout_summary_tmp.csv"
+                pd.DataFrame(rows).to_csv(tmp_csv, index=False)
+                _atomic_replace(tmp_csv, exp_log_out_dir / "rollout_summary.csv")
+
+            if ep_ends:
+                try:
+                    import pandas as pd  # noqa: WPS433
+
+                    tmp_eps = exp_log_out_dir / "episodes_tmp.csv"
+                    pd.DataFrame([e.__dict__ for e in ep_ends]).to_csv(tmp_eps, index=False)
+                    _atomic_replace(tmp_eps, exp_log_out_dir / "episodes.csv")
+                except Exception:
+                    pass
+
+            if do_plot and T > 0:
+                try:
+                    center = np.asarray(meta["cylinder_center"], dtype=np.float64)
+                    traj_xyz = x_arr[:, 0, 0:3]
+                    tmp_png = exp_log_out_dir / "trajectory_xy_tmp.png"
+                    _plot_orbit_xy(
+                        out_path=tmp_png,
+                        traj_xyz=traj_xyz,
+                        center=center,
+                        orbit_radius=float(meta["orbit_radius"]),
+                        cylinder_radius=float(meta["cylinder_radius"]),
+                        n_ref=int(exp_log_cfg.get("plot_num_points", 200)),
+                    )
+                    _atomic_replace(tmp_png, exp_log_out_dir / "trajectory_xy.png")
+                except Exception:
+                    pass
 
         if exp_log_enable:
             root = Path(os.environ.get("MARINEGYM_ROOT", str(Path.cwd()))).expanduser()
@@ -264,6 +453,8 @@ def main(cfg):
 
             n_envs = int(getattr(base_env, "num_envs", 1))
             nu = int(getattr(base_env.drone, "action_spec", env.action_spec[("agents", "action")]).shape[-1])
+            exp_log_n_envs = n_envs
+            exp_log_nu = nu
             exp_log_buffers = {
                 "step": [],
                 "episode_id": [],
@@ -279,11 +470,18 @@ def main(cfg):
             }
             ep_id = torch.zeros((n_envs,), device=base_env.device, dtype=torch.long)
             ep_len = torch.zeros((n_envs,), device=base_env.device, dtype=torch.long)
+            # Create a placeholder file early so users can verify the output path while the sim is running.
+            try:
+                _save_exp_buffers(do_plot=False)
+            except Exception:
+                pass
 
         # Layered orbit state (spiral down by changing OrbitCylinderMPC.orbit_z each lap)
         lap_count = 0
         two_pi = 2.0 * math.pi
         transition = None  # {"start_z":..., "target_z":..., "steps":..., "left":...}
+        flush_interval_steps = int(exp_log_cfg.get("flush_interval_steps", 0) or 0) if exp_log_enable else 0
+        flush_plot = bool(exp_log_cfg.get("flush_plot", False)) if exp_log_enable else False
 
         step_idx = 0
         while True:
@@ -334,23 +532,29 @@ def main(cfg):
             td = td_next
 
             if exp_log_enable and exp_log_buffers is not None and ep_id is not None and ep_len is not None:
+                n_envs = int(ep_id.numel())
+
                 try:
                     done = td_next.get("done", None)
                     terminated = td_next.get("terminated", None)
                     truncated = td_next.get("truncated", None)
                     if done is None:
-                        done = torch.zeros((int(ep_id.numel()), 1), device=base_env.device, dtype=torch.bool)
+                        done = torch.zeros((n_envs, 1), device=base_env.device, dtype=torch.bool)
                     if terminated is None:
                         terminated = torch.zeros_like(done, dtype=torch.bool)
                     if truncated is None:
                         truncated = torch.zeros_like(done, dtype=torch.bool)
-
                     done_mask = done.squeeze(-1)
                     term_mask = terminated.squeeze(-1)
                     trunc_mask = truncated.squeeze(-1)
+                except Exception:
+                    done_mask = torch.zeros((n_envs,), device=base_env.device, dtype=torch.bool)
+                    term_mask = torch.zeros_like(done_mask, dtype=torch.bool)
+                    trunc_mask = torch.zeros_like(done_mask, dtype=torch.bool)
 
-                    # stage cost: 0.5 * (e^T W e + u^T W_u u)
-                    cost = None
+                # stage cost: 0.5 * (e^T W e + u^T W_u u)
+                cost = None
+                try:
                     if x_k is not None and e_k is not None and u_k is not None:
                         q = cfg.task
                         q_radial = float(q.get("mpc_q_radial", 50.0))
@@ -378,7 +582,9 @@ def main(cfg):
                             dtype=e_k.dtype,
                         ).view(1, 10)
                         r_u = float(q.get("mpc_r_u", 0.01))
-                        max_thruster_force = float(q.get("pypose_max_thruster_force", q.get("mpc_max_thruster_force", 40.0)))
+                        max_thruster_force = float(
+                            q.get("pypose_max_thruster_force", q.get("mpc_max_thruster_force", 40.0))
+                        )
                         w_u = torch.full(
                             (1, int(u_k.shape[-1])),
                             float(r_u) * float(max_thruster_force**2),
@@ -388,10 +594,13 @@ def main(cfg):
                         cost_err = (w_err * e_k.square()).sum(dim=-1)
                         cost_u = (w_u * u_k.square()).sum(dim=-1)
                         cost = 0.5 * (cost_err + cost_u)
-                    if cost is None:
-                        cost = torch.zeros((int(ep_id.numel()),), device=base_env.device, dtype=torch.float32)
+                except Exception:
+                    cost = None
+                if cost is None:
+                    cost = torch.zeros((n_envs,), device=base_env.device, dtype=torch.float32)
 
-                    # update episode lens and end events
+                # update episode lens and end events
+                try:
                     ep_len += 1
                     if bool(done_mask.any()):
                         for i in torch.nonzero(done_mask, as_tuple=False).flatten().tolist():
@@ -413,29 +622,39 @@ def main(cfg):
 
                         ep_id = ep_id + done_mask.to(dtype=ep_id.dtype)
                         ep_len = torch.where(done_mask, torch.zeros_like(ep_len), ep_len)
-
-                    success = (~term_mask) & trunc_mask
-                    failure = term_mask
-
-                    exp_log_buffers["step"].append(int(step_idx))
-                    exp_log_buffers["episode_id"].append(_to_numpy(ep_id))
-                    exp_log_buffers["x"].append(
-                        _to_numpy(x_k) if x_k is not None else np.zeros((int(ep_id.numel()), 13), dtype=np.float32)
-                    )
-                    exp_log_buffers["u"].append(
-                        _to_numpy(u_k) if u_k is not None else np.zeros((int(ep_id.numel()), int(nu)), dtype=np.float32)
-                    )
-                    exp_log_buffers["orbit_err"].append(
-                        _to_numpy(e_k) if e_k is not None else np.zeros((int(ep_id.numel()), 10), dtype=np.float32)
-                    )
-                    exp_log_buffers["cost"].append(_to_numpy(cost))
-                    exp_log_buffers["done"].append(_to_numpy(done_mask))
-                    exp_log_buffers["terminated"].append(_to_numpy(term_mask))
-                    exp_log_buffers["truncated"].append(_to_numpy(trunc_mask))
-                    exp_log_buffers["success"].append(_to_numpy(success))
-                    exp_log_buffers["failure"].append(_to_numpy(failure))
                 except Exception:
                     pass
+
+                success = (~term_mask) & trunc_mask
+                failure = term_mask
+
+                exp_log_buffers["step"].append(int(step_idx))
+                exp_log_buffers["episode_id"].append(_coerce_np_array(ep_id, shape=(n_envs,), dtype=np.int64))
+                exp_log_buffers["x"].append(_coerce_np_array(x_k, shape=(n_envs, 13), dtype=np.float32))
+                exp_log_buffers["u"].append(_coerce_np_array(u_k, shape=(n_envs, int(nu)), dtype=np.float32))
+                exp_log_buffers["orbit_err"].append(_coerce_np_array(e_k, shape=(n_envs, 10), dtype=np.float32))
+                exp_log_buffers["cost"].append(_coerce_np_array(cost, shape=(n_envs,), dtype=np.float32))
+                exp_log_buffers["done"].append(
+                    _coerce_np_array(done_mask, shape=(n_envs,), dtype=np.bool_, fill_value=False)
+                )
+                exp_log_buffers["terminated"].append(
+                    _coerce_np_array(term_mask, shape=(n_envs,), dtype=np.bool_, fill_value=False)
+                )
+                exp_log_buffers["truncated"].append(
+                    _coerce_np_array(trunc_mask, shape=(n_envs,), dtype=np.bool_, fill_value=False)
+                )
+                exp_log_buffers["success"].append(
+                    _coerce_np_array(success, shape=(n_envs,), dtype=np.bool_, fill_value=False)
+                )
+                exp_log_buffers["failure"].append(
+                    _coerce_np_array(failure, shape=(n_envs,), dtype=np.bool_, fill_value=False)
+                )
+
+                if flush_interval_steps > 0 and (step_idx % flush_interval_steps) == 0:
+                    try:
+                        _save_exp_buffers(do_plot=flush_plot)
+                    except Exception:
+                        pass
 
             done = td.get("done", None)
             if done is not None and bool(done.any()):
@@ -487,109 +706,7 @@ def main(cfg):
     finally:
         if exp_log_enable and exp_log_out_dir is not None and exp_log_buffers is not None:
             try:
-                step_arr = np.asarray(exp_log_buffers["step"], dtype=np.int64)
-                ep_arr = np.stack(exp_log_buffers["episode_id"], axis=0)  # (T,E)
-                x_arr = np.stack(exp_log_buffers["x"], axis=0)  # (T,E,13)
-                u_arr = np.stack(exp_log_buffers["u"], axis=0)  # (T,E,nu)
-                e_arr = np.stack(exp_log_buffers["orbit_err"], axis=0)  # (T,E,10)
-                cost_arr = np.stack(exp_log_buffers["cost"], axis=0)  # (T,E)
-                done_arr = np.stack(exp_log_buffers["done"], axis=0).astype(np.bool_)
-                term_arr = np.stack(exp_log_buffers["terminated"], axis=0).astype(np.bool_)
-                trunc_arr = np.stack(exp_log_buffers["truncated"], axis=0).astype(np.bool_)
-                succ_arr = np.stack(exp_log_buffers["success"], axis=0).astype(np.bool_)
-                fail_arr = np.stack(exp_log_buffers["failure"], axis=0).astype(np.bool_)
-
-                meta = {
-                    "seed": int(seed),
-                    "dt": float(cfg.sim.dt),
-                    "substeps": int(cfg.sim.substeps),
-                    "max_episode_length": int(cfg.env.max_episode_length),
-                    "orbit_radius": float(getattr(base_env, "orbit_radius", 0.0)),
-                    "orbit_z": float(getattr(base_env, "orbit_z", 0.0)),
-                    "orbit_v_tan": float(getattr(base_env, "orbit_v_tan", 0.0)),
-                    "orbit_direction": float(getattr(base_env, "orbit_direction", 1.0)),
-                    "orbit_yaw_offset": float(getattr(base_env, "orbit_yaw_offset", 0.0)),
-                    "cylinder_center": _to_numpy(getattr(base_env, "cylinder_center", torch.zeros(1, 1, 3))).reshape(-1).tolist(),
-                    "cylinder_radius": float(getattr(base_env, "cylinder_radius", 0.0)),
-                    "cylinder_height": float(getattr(base_env, "cylinder_height", 0.0)),
-                    "mpc_q": {
-                        "radial": float(cfg.task.get("mpc_q_radial", 0.0)),
-                        "z": float(cfg.task.get("mpc_q_z", 0.0)),
-                        "tan": float(cfg.task.get("mpc_q_tan", 0.0)),
-                        "radial_speed": float(cfg.task.get("mpc_q_radial_speed", 0.0)),
-                        "heading": float(cfg.task.get("mpc_q_heading", 0.0)),
-                        "roll": float(cfg.task.get("mpc_q_roll", 0.0)),
-                        "pitch": float(cfg.task.get("mpc_q_pitch", 0.0)),
-                        "wxy": float(cfg.task.get("mpc_q_wxy", 0.0)),
-                    },
-                    "mpc_r_u": float(cfg.task.get("mpc_r_u", 0.0)),
-                }
-
-                if bool(exp_log_cfg.get("save_npz", True)):
-                    np.savez_compressed(
-                        exp_log_out_dir / "rollout.npz",
-                        step=step_arr,
-                        episode_id=ep_arr,
-                        x=x_arr,
-                        u=u_arr,
-                        orbit_err=e_arr,
-                        cost=cost_arr,
-                        done=done_arr,
-                        terminated=term_arr,
-                        truncated=trunc_arr,
-                        success=succ_arr,
-                        failure=fail_arr,
-                        meta=np.array([meta], dtype=object),
-                    )
-
-                if bool(exp_log_cfg.get("save_csv", False)):
-                    import pandas as pd  # noqa: WPS433
-
-                    T, E = x_arr.shape[0], x_arr.shape[1]
-                    rows = []
-                    for ti in range(T):
-                        for ei in range(E):
-                            rows.append(
-                                {
-                                    "t": int(step_arr[ti]),
-                                    "env": int(ei),
-                                    "episode_id": int(ep_arr[ti, ei]),
-                                    "x": float(x_arr[ti, ei, 0]),
-                                    "y": float(x_arr[ti, ei, 1]),
-                                    "z": float(x_arr[ti, ei, 2]),
-                                    "cost": float(cost_arr[ti, ei]),
-                                    "done": bool(done_arr[ti, ei]),
-                                    "terminated": bool(term_arr[ti, ei]),
-                                    "truncated": bool(trunc_arr[ti, ei]),
-                                    "success": bool(succ_arr[ti, ei]),
-                                    "failure": bool(fail_arr[ti, ei]),
-                                }
-                            )
-                    pd.DataFrame(rows).to_csv(exp_log_out_dir / "rollout_summary.csv", index=False)
-
-                if ep_ends:
-                    try:
-                        import pandas as pd  # noqa: WPS433
-
-                        pd.DataFrame([e.__dict__ for e in ep_ends]).to_csv(exp_log_out_dir / "episodes.csv", index=False)
-                    except Exception:
-                        pass
-
-                if bool(exp_log_cfg.get("plot", True)):
-                    try:
-                        center = np.asarray(meta["cylinder_center"], dtype=np.float64)
-                        traj_xyz = x_arr[:, 0, 0:3]
-                        _plot_orbit_xy(
-                            out_path=exp_log_out_dir / "trajectory_xy.png",
-                            traj_xyz=traj_xyz,
-                            center=center,
-                            orbit_radius=float(meta["orbit_radius"]),
-                            cylinder_radius=float(meta["cylinder_radius"]),
-                            n_ref=int(exp_log_cfg.get("plot_num_points", 200)),
-                        )
-                    except Exception:
-                        pass
-
+                _save_exp_buffers(do_plot=bool(exp_log_cfg.get("plot", True)))
                 print(f"[test_mpc_withCam] saved experiment logs: {exp_log_out_dir}")
             except Exception as e:
                 print(f"[test_mpc_withCam] failed to save experiment logs: {e}")

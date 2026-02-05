@@ -34,6 +34,8 @@ from setproctitle import setproctitle
 from torchrl.envs.transforms import TransformedEnv, InitTracker, Compose
 
 # ~/isaac410/python.sh scripts/train.py task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv task.use_internal_mpc=false headless=true enable_livestream=false env.num_envs=10
+# ~/isaac410/python.sh scripts/train.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1
+
 
 
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))

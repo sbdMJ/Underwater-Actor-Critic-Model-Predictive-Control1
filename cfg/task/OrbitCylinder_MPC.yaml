@@ -10,7 +10,7 @@ env:
   num_envs: 1
   env_spacing: 6
   # 1 episode = 1 lap (orbit_period_steps)
-  max_episode_length: 6000
+  max_episode_length: 12000
 
 # PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
 # reset 시 PhysX 에러로 시뮬이 종료될 수 있어, MPC 태스크 기본은 CPU pipeline로 둡니다.
@@ -29,6 +29,11 @@ time_encoding: true
 reward_effort_weight: 0.1
 reward_action_smoothness_weight: 0.0
 reward_distance_scale: 1.2
+# Optional: extra action-magnitude shaping term (encourages higher learned w_u/r_u in steady-state).
+# reward_action_mag = w * gate * exp(-scale * mean(|u|)).
+reward_action_mag_weight: 0.0
+reward_action_mag_scale: 4.0
+reward_action_mag_gate_by_orbit: true
 # Reward mode:
 #   - hover: Hover-style reward to a target (auto -> moving waypoint when use_internal_mpc=false)
 #   - orbit_cost: cylinder-orbit cost based reward (radial/z/tangent/heading/roll/pitch/wxy + effort)
@@ -37,15 +42,15 @@ reward_mode: orbit_cost
 reward_orbit_cost_scale: 1.0
 
 # Cylinder-aware MPC 설정
-mpc_horizon: 5
-mpc_r_u: 0.01
-mpc_q_radial: 50.0
-mpc_q_z: 30.0
-mpc_q_tan: 10.0
-mpc_q_radial_speed: 5.0
-mpc_q_heading: 30.0
-mpc_q_roll: 60.0
-mpc_q_pitch: 60.0
+mpc_horizon: 3
+mpc_r_u: 0.001
+mpc_q_radial: 100.0
+mpc_q_z: 100.0
+mpc_q_tan: 5.0
+mpc_q_radial_speed: 80.0
+mpc_q_heading: 100.0
+mpc_q_roll: 100.0
+mpc_q_pitch: 100.0
 mpc_q_wxy: 0.5
 mpc_max_thruster_force: 40.0
 thrust_axis: 0
@@ -59,14 +64,14 @@ cylinder:
 
 # Desired orbit: keep distance = orbit_radius from center (typically radius + clearance)
 orbit_clearance: 1.0
-orbit_radius: 1.4
+orbit_radius: 1.0
 orbit_z: 1.5
 orbit_period_steps: 300
 orbit_direction: 1.0  # +1: CCW, -1: CW
 orbit_yaw_offset: 0.0
 hide_target_vis: true
 # desired tangential speed (m/s). If 0, controller uses 2*pi*R/(orbit_period_steps*dt)
-orbit_v_tan: 1.5
+orbit_v_tan: 0.0
 
 # Target (used in Hover-style obs/reward):
 #   - auto: waypoint when use_internal_mpc=false else center
@@ -88,7 +93,7 @@ pypose_orbit_waypoint_lookahead_steps: 20
 pypose_mpc_horizon: 3
 pypose_mpc_ilqr_iters: 2
 pypose_mpc_ilqr_reg: 1e-3
-pypose_mpc_terminal_weight_mult: 10.0
+pypose_mpc_terminal_weight_mult: 50.0
 # If unset, falls back to mpc_max_thruster_force.
 pypose_max_thruster_force: 40.0
 
@@ -116,8 +121,15 @@ init_rpy_min: [0.0, 0.0, 0.0]
 init_rpy_max: [0.0, 0.0, 0.0]
 
 # MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
-terminate_distance: 10.0
+terminate_distance: 7.0 #2.3
 terminate_min_z: 0.1
+
+# Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
+# This helps avoid "do nothing" local optima during RL training (earning only effort reward).
+terminate_stationary_enable: true
+terminate_stationary_xy_eps: 0.002
+terminate_stationary_steps: 300
+terminate_stationary_grace_steps: 60
 
 action_transform: null
 
