@@ -1,0 +1,180 @@
+name: OrbitCylinderMPC
+
+defaults:
+  - /base/env_base@_here_
+  - /base/sim_base@_here_
+  - randomization@_here_
+  - disturbances@_here_
+
+env:
+  num_envs: 1
+  env_spacing: 6
+  # 1 episode = 1 lap (orbit_period_steps)
+  max_episode_length: 12000
+  current:
+    enable: false
+    range: 0.05
+
+# PhysX Direct GPU API(eENABLE_DIRECT_GPU_API) 환경에선 set_world_poses(teleport)가 금지되어
+# reset 시 PhysX 에러로 시뮬이 종료될 수 있어, MPC 태스크 기본은 CPU pipeline로 둡니다.
+sim:
+  device: cuda:0
+  use_gpu_pipeline: true
+  use_gpu: true
+
+drone_model:
+  name: BlueROV
+  controller: MPCController
+
+force_sensor: false
+time_encoding: true
+
+# NOTE: orbit_ppo reward already includes explicit ||u||^2 / ||du||^2 penalties.
+# Keep these legacy Hover terms disabled to avoid double-regularization.
+reward_effort_weight: 0.0
+reward_action_smoothness_weight: 0.0
+reward_distance_scale: 1.2
+
+# Reward mode:
+#   - orbit_ppo: PPO-friendly dense shaping for stable clockwise orbiting
+reward_mode: orbit_ppo
+
+# Orbit PPO reward shaping parameters (used only when reward_mode=orbit_ppo).
+# z_target mode:
+#   - fixed: use orbit_z
+#   - initial: keep the reset depth as z_target
+reward_orbit_z_target_mode: fixed
+
+# (1) Radius/depth shaping: r = exp(-(|e|/sigma)^2)
+reward_orbit_sigma_r: 0.20
+reward_orbit_sigma_z: 0.20
+
+# (5) Roll/pitch shaping: r_att = exp(-((|roll|/sigma_roll)^2 + (|pitch|/sigma_pitch)^2))
+reward_orbit_sigma_roll: 0.35   # rad (~20deg)
+reward_orbit_sigma_pitch: 0.35  # rad (~20deg)
+
+# (4) Progress shaping mode:
+#   - theta: use delta_theta (wrap_to_pi) with desired direction sign
+#   - vtan: use tangential speed along desired direction
+#   - both: average of the two
+reward_orbit_progress_mode: both
+reward_orbit_theta_scale: 0.0872664626  # 5deg in rad
+reward_orbit_v_tan_ref: 0.5            # m/s (used when mode=vtan/both)
+# Optional heading offset (radians) to account for model forward-axis mismatch.
+# Defaults to task.orbit_yaw_offset when unset.
+reward_orbit_yaw_offset: 0.0
+
+# Progress gating (encourage: "look at cylinder while orbiting")
+# - none|mul|threshold
+reward_orbit_progress_gate_mode: mul
+reward_orbit_gate_heading_power: 2.0
+reward_orbit_gate_radius_power: 1.0
+reward_orbit_gate_heading_min: 0.8
+reward_orbit_gate_radius_min: 0.8
+
+# Positive term weights (keep heading/progress moderate for stability).
+reward_orbit_w_radius: 1.0
+reward_orbit_w_depth: 1.0
+reward_orbit_w_heading: 0.5
+reward_orbit_w_progress: 0.5
+# Penalize progress in the wrong direction (helps enforce clockwise).
+reward_orbit_w_backwards: 0.5
+reward_orbit_w_att: 0.25
+
+# Sparse lap bonus: +bonus each time the vehicle completes a full 2*pi orbit (in desired direction).
+reward_orbit_lap_bonus: 1.0
+
+# Penalty weights.
+reward_orbit_w_u: 0.05
+reward_orbit_w_du: 0.10
+reward_orbit_w_omega: 0.02
+# Penalize radial (in/out) motion in the XY plane: penalty = (v_rad/v_ref)^2 (clipped to [0,1])
+reward_orbit_w_v_rad: 0.20
+reward_orbit_v_rad_ref: 0.30
+
+# Termination thresholds / penalties (done + penalty).
+# NOTE: r_min/r_max are absolute radii (meters).
+reward_orbit_r_min: 0.50
+reward_orbit_r_max: 2.00
+reward_orbit_rp_max_deg: 45.0
+reward_orbit_terminate_penalty: -2.0
+
+# Reward clipping.
+reward_orbit_clip_min: -5.0
+reward_orbit_clip_max: 5.0
+
+# Optional: stationary penalty (discourage staying at the same XY position too long).
+# - delta_xy < xy_eps is considered "still"
+# - after grace_steps, count consecutive still steps
+# - penalty ramps from 0->1 over [start_steps, full_steps] and is scaled by w_stationary
+reward_orbit_w_stationary: 3.0
+reward_orbit_stationary_xy_eps: 0.002
+reward_orbit_stationary_grace_steps: 60
+reward_orbit_stationary_start_steps: 60
+reward_orbit_stationary_full_steps: 240
+
+# Cylinder-aware MPC 설정 (kept for compatibility; PPO direct-control sets use_internal_mpc=false in scripts/train.py)
+mpc_horizon: 3
+mpc_r_u: 0.001
+mpc_q_radial: 100.0
+mpc_q_z: 100.0
+mpc_q_tan: 5.0
+mpc_q_radial_speed: 80.0
+mpc_q_heading: 100.0
+mpc_q_roll: 100.0
+mpc_q_pitch: 100.0
+mpc_q_wxy: 0.5
+mpc_max_thruster_force: 40.0
+thrust_axis: 0
+
+# Orbit cylinder task params (env-frame)
+cylinder_center: [0.0, 0.0, 1.5]
+cylinder_radius: 0.4
+cylinder_height: 3.0
+cylinder:
+  color: [0.9, 0.4, 0.1]
+
+# Desired orbit: keep distance = orbit_radius from center (typically radius + clearance)
+orbit_clearance: 1.0
+orbit_radius: 1.0
+orbit_z: 1.5
+orbit_period_steps: 300
+orbit_direction: -1.0  # +1: CCW, -1: CW
+orbit_yaw_offset: 0.0
+hide_target_vis: true
+# desired tangential speed (m/s). If 0, controller uses 2*pi*R/(orbit_period_steps*dt)
+orbit_v_tan: 0.0
+
+# Target (used in obs/reward):
+#   - auto: center for orbit-cost/ppo reward, else waypoint when use_internal_mpc=false
+orbit_target_mode: auto
+
+# Spawn near the orbit (helps PPO explore)
+random_target_pos: false
+random_target_yaw: false
+init_pos_min: [1.0, -0.3, 1.4]
+init_pos_max: [1.8, 0.3, 1.6]
+init_rpy_min: [0.0, 0.0, 0.0]
+init_rpy_max: [0.0, 0.0, 0.0]
+
+# Deterministic spawn (train/eval): always start from the same pose and face the cylinder center.
+# Enable with spawn_fixed=true. If spawn_fixed_pos is omitted, defaults to:
+#   [cylinder_center.x + orbit_radius, cylinder_center.y, orbit_z]
+spawn_fixed: true
+
+# MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
+terminate_distance: 7.0 #2.3
+terminate_min_z: 0.1
+
+# Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
+terminate_stationary_enable: false
+terminate_stationary_xy_eps: 0.01
+terminate_stationary_steps: 300
+terminate_stationary_grace_steps: 60
+
+action_transform: null
+
+# If true, the env overwrites RL actions with its own MPC output each step.
+# For PPO (algo=ppo) scripts/train.py forces this to false for OrbitCylinderMPC.
+control_mode: mpc
+use_internal_mpc: true
