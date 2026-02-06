@@ -3,8 +3,10 @@ import torch
 import omni.isaac.core.utils.prims as prim_utils
 from pxr import Gf, UsdGeom
 from tensordict.tensordict import TensorDict
+from torchrl.data import UnboundedContinuousTensorSpec
 
 from marinegym.envs.single.hover_mpc import HoverMPC
+from marinegym.rewards.orbit_ppo import OrbitPPORewardCfg, compute_orbit_ppo_reward_terms
 from marinegym.utils.torch import quat_axis, euler_to_quaternion
 
 
@@ -50,7 +52,7 @@ class OrbitCylinderMPC(HoverMPC):
             # For RL training (use_internal_mpc=false):
             #   - hover reward wants a moving waypoint target in obs/reward.
             #   - orbit-cost reward does not need a moving target; keep target at center for stability.
-            if self.reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+            if self.reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
                 orbit_target_mode = "center"
             else:
                 orbit_target_mode = "waypoint" if not getattr(self, "_use_internal_mpc", True) else "center"
@@ -76,6 +78,21 @@ class OrbitCylinderMPC(HoverMPC):
         # Waypoint-mode phase (initialized on reset): theta0 per env.
         self._orbit_theta0 = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
 
+        # Deterministic spawn (train/eval): optionally force a fixed initial position and yaw
+        # that faces the cylinder center in the horizontal plane.
+        # Enable with `task.spawn_fixed=true`. If `task.spawn_fixed_pos` is not provided,
+        # defaults to [cylinder_center.x + orbit_radius, cylinder_center.y, orbit_z].
+        if bool(cfg.task.get("spawn_fixed", False)):
+            center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, float(self.orbit_z)])
+            center_vals = [float(x) for x in center_cfg]
+            spawn_pos_cfg = cfg.task.get("spawn_fixed_pos", None)
+            if spawn_pos_cfg is None:
+                spawn_pos_cfg = [center_vals[0] + float(self.orbit_radius), center_vals[1], float(self.orbit_z)]
+            self.spawn_fixed_pos = [float(x) for x in spawn_pos_cfg]
+            face_point_cfg = cfg.task.get("spawn_face_point", center_vals)
+            self.spawn_face_point = [float(x) for x in face_point_cfg]
+            self.spawn_face_yaw_offset = float(cfg.task.get("spawn_face_yaw_offset", float(self.orbit_yaw_offset)))
+
         # Optional termination: if the vehicle stays nearly stationary (XY) for too long.
         # Useful to avoid "do nothing" local optima (e.g., earning only the effort reward).
         self.terminate_stationary_enable = bool(cfg.task.get("terminate_stationary_enable", False))
@@ -90,15 +107,94 @@ class OrbitCylinderMPC(HoverMPC):
             self._stationary_steps_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
             self._stationary_prev_xy = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
 
+        # Optional reward shaping: if the vehicle stays (almost) in place for too long, subtract a penalty.
+        # This discourages "do nothing" local optima even when termination is disabled.
+        self.reward_orbit_stationary_w = float(cfg.task.get("reward_orbit_w_stationary", 0.0))
+        self.reward_orbit_stationary_xy_eps = float(
+            cfg.task.get("reward_orbit_stationary_xy_eps", cfg.task.get("terminate_stationary_xy_eps", 0.0))
+        )
+        self.reward_orbit_stationary_grace_steps = int(
+            cfg.task.get(
+                "reward_orbit_stationary_grace_steps",
+                cfg.task.get("terminate_stationary_grace_steps", 0),
+            )
+        )
+        self.reward_orbit_stationary_start_steps = int(cfg.task.get("reward_orbit_stationary_start_steps", 0))
+        self.reward_orbit_stationary_full_steps = int(cfg.task.get("reward_orbit_stationary_full_steps", 0))
+        if self.reward_orbit_stationary_full_steps <= self.reward_orbit_stationary_start_steps:
+            self.reward_orbit_stationary_full_steps = self.reward_orbit_stationary_start_steps + 1
+        if self.reward_orbit_stationary_w != 0.0 and self.reward_orbit_stationary_xy_eps > 0.0:
+            self._orbit_stationary_steps_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
+            self._orbit_stationary_prev_xy = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
+
         # Optional reward shaping: penalize large actions more when orbit tracking is already good.
         # This gives the policy an incentive to increase learned w_u (r_u) in steady-state.
         self.reward_action_mag_weight = float(cfg.task.get("reward_action_mag_weight", 0.0))
         self.reward_action_mag_scale = float(cfg.task.get("reward_action_mag_scale", 1.0))
         self.reward_action_mag_gate_by_orbit = bool(cfg.task.get("reward_action_mag_gate_by_orbit", True))
 
+        # --- orbit_ppo reward bookkeeping ---
+        # Previous theta (for delta-theta progress reward) and previous action (for du penalty).
+        # Stored per-env (agent dimension is always 1 for these single-agent tasks).
+        self._orbit_prev_theta = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        nu = int(self.drone.action_spec.shape[-1])
+        self._orbit_prev_u_cmd = torch.zeros(self.num_envs, nu, device=self.device, dtype=torch.float32)
+        # Optional: keep z_target fixed to the initial depth at reset.
+        self._orbit_z_target_mode = str(cfg.task.get("reward_orbit_z_target_mode", "fixed")).strip().lower()
+        self._orbit_z_target = torch.full((self.num_envs,), float(self.orbit_z), device=self.device, dtype=torch.float32)
+        # Sparse lap bonus: add +bonus whenever the vehicle completes a full 2*pi orbit in the desired direction.
+        self.reward_orbit_lap_bonus = float(cfg.task.get("reward_orbit_lap_bonus", 0.0))
+        self._orbit_lap_progress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._orbit_lap_count = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
+
     @staticmethod
     def _is_waypoint_mode(mode: str) -> bool:
         return str(mode).lower() in ("waypoint", "moving_waypoint", "wp")
+
+    def _set_specs(self):
+        super()._set_specs()
+        # Add extra per-term stats for orbit_ppo reward debugging / logging.
+        # These are ignored by the PPO networks but get logged via scripts/train.py EpisodeStats.
+        stats_spec = self.observation_spec["stats"]
+        extra_keys = [
+            "reward_step",
+            "r_radius",
+            "r_depth",
+            "r_heading",
+            "r_progress",
+            "r_progress_raw",
+            "progress_gate",
+            "r_progress_back",
+            "lap_bonus",
+            "lap_count",
+            "lap_progress",
+            "r_att",
+            "cos_yaw",
+            "delta_theta",
+            "v_tan",
+            "v_rad",
+            "delta_xy",
+            "dist_xy",
+            "e_r",
+            "e_z",
+            "roll",
+            "pitch",
+            "penalty_u",
+            "penalty_du",
+            "penalty_omega",
+            "penalty_v_rad",
+            "penalty_stationary",
+            "stationary_steps",
+            "terminate_orbit_ppo",
+        ]
+        leaf_shape = tuple(stats_spec.shape) + (1,)
+        for k in extra_keys:
+            if k not in stats_spec.keys():
+                stats_spec[k] = UnboundedContinuousTensorSpec(leaf_shape, device=self.device)
+        # Ensure spec device matches the env.
+        stats_spec.to(self.device)
+        self.observation_spec["stats"] = stats_spec
+        self.stats = stats_spec.zero()
 
     def _orbit_dtheta(self, *, dtype: torch.dtype, device) -> torch.Tensor:
         # dtheta per (env) step, based on desired tangential speed.
@@ -199,6 +295,23 @@ class OrbitCylinderMPC(HoverMPC):
             )
         else:
             self.current_vel[env_ids] = 0.0
+
+        # Reset orbit_ppo bookkeeping for the selected envs.
+        try:
+            pos = self.drone.pos[env_ids].squeeze(1)  # (E, 3) env-frame
+            center = self.cylinder_center.squeeze(0).expand(self.num_envs, 3)[env_ids].to(device=pos.device, dtype=pos.dtype)
+            rel = pos[:, 0:2] - center[:, 0:2]
+            theta = torch.atan2(rel[:, 1], rel[:, 0])
+            self._orbit_prev_theta[env_ids] = theta.to(dtype=self._orbit_prev_theta.dtype)
+            self._orbit_prev_u_cmd[env_ids] = 0.0
+            self._orbit_lap_progress[env_ids] = 0.0
+            self._orbit_lap_count[env_ids] = 0
+            if self._orbit_z_target_mode in ("initial", "init", "reset"):
+                self._orbit_z_target[env_ids] = pos[:, 2].to(dtype=self._orbit_z_target.dtype)
+            else:
+                self._orbit_z_target[env_ids] = float(self.orbit_z)
+        except Exception:
+            pass
         if self.current_enable and hasattr(self, "drone") and hasattr(self.drone, "flow_vels"):
             base_flow = self.drone.flow_vels[env_ids, 0, :3]
             self.drone.flow_vels[env_ids, 0, :3] = base_flow + self.current_vel[env_ids].to(
@@ -231,6 +344,19 @@ class OrbitCylinderMPC(HoverMPC):
                 except Exception:
                     pass
 
+        # Reset stationary-penalty buffers (orbit_ppo only).
+        if hasattr(self, "_orbit_stationary_steps_buf") and hasattr(self, "_orbit_stationary_prev_xy"):
+            try:
+                self.drone.get_state()
+                pos_xy = self.drone.pos[env_ids].squeeze(1)[:, 0:2]  # (E, 2)
+                self._orbit_stationary_steps_buf[env_ids] = 0
+                self._orbit_stationary_prev_xy[env_ids].copy_(pos_xy.to(dtype=self._orbit_stationary_prev_xy.dtype))
+            except Exception:
+                try:
+                    self._orbit_stationary_steps_buf[env_ids] = 0
+                except Exception:
+                    pass
+
         if self._is_waypoint_mode(getattr(self, "orbit_target_mode", "center")):
             # IsaacEnv resets progress_buf after _reset_idx; ensure t=0 here for correct initial waypoint.
             self.progress_buf[env_ids] = 0.0
@@ -250,8 +376,9 @@ class OrbitCylinderMPC(HoverMPC):
 
         # If we keep the target at the center, make its heading dynamically point to the cylinder center
         # (so obs rheading is meaningful) when training with orbit-cost reward.
-        if (self.reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit")) and not self._is_waypoint_mode(
-            getattr(self, "orbit_target_mode", "center")
+        if (
+            self.reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit")
+            and not self._is_waypoint_mode(getattr(self, "orbit_target_mode", "center"))
         ):
             try:
                 pos = self.drone_state[..., :3]  # (E, 1, 3) env-frame
@@ -305,7 +432,8 @@ class OrbitCylinderMPC(HoverMPC):
         return td
 
     def _compute_reward_and_done(self):
-        if self.reward_mode not in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+        orbit_reward_modes = ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit")
+        if self.reward_mode not in orbit_reward_modes:
             return super()._compute_reward_and_done()
 
         try:
@@ -335,39 +463,155 @@ class OrbitCylinderMPC(HoverMPC):
             yaw_offset=yaw_offset_t,
         )  # (E, 10)
 
-        q_radial = float(self.cfg.task.get("reward_q_radial", self.cfg.task.get("mpc_q_radial", 50.0)))
-        q_z = float(self.cfg.task.get("reward_q_z", self.cfg.task.get("mpc_q_z", 30.0)))
-        q_tan = float(self.cfg.task.get("reward_q_tan", self.cfg.task.get("mpc_q_tan", 10.0)))
-        q_radial_speed = float(self.cfg.task.get("reward_q_radial_speed", self.cfg.task.get("mpc_q_radial_speed", 5.0)))
-        q_heading = float(self.cfg.task.get("reward_q_heading", self.cfg.task.get("mpc_q_heading", 30.0)))
-        q_roll = float(self.cfg.task.get("reward_q_roll", self.cfg.task.get("mpc_q_roll", 60.0)))
-        q_pitch = float(self.cfg.task.get("reward_q_pitch", self.cfg.task.get("mpc_q_pitch", 60.0)))
-        q_wxy = float(self.cfg.task.get("reward_q_wxy", self.cfg.task.get("mpc_q_wxy", 0.5)))
+        if self.reward_mode == "orbit_ppo":
+            # Full PPO reward shaping (radius/depth/heading/clockwise progress/attitude + penalties).
+            # The actual term computation lives in `marinegym.rewards.orbit_ppo` for easier testing.
+            nu = int(self.drone.action_spec.shape[-1])
+            u_cmd = getattr(self, "_last_action_cmd", None)
+            if u_cmd is None:
+                u_cmd = getattr(self.drone, "throttle", None)
+            if u_cmd is None:
+                u_cmd = torch.zeros((self.num_envs, nu), device=device, dtype=dtype)
+            if u_cmd.ndim >= 3:
+                u_cmd = u_cmd.squeeze(1)
+            u_cmd = u_cmd.to(device=device, dtype=dtype)
 
-        w_err = torch.as_tensor(
-            [
-                q_radial,
-                q_z,
-                q_tan,
-                q_radial_speed,
-                q_heading,
-                q_heading,
-                q_roll,
-                q_pitch,
-                q_wxy,
-                q_wxy,
-            ],
-            device=device,
-            dtype=dtype,
-        )
+            u_prev = self._orbit_prev_u_cmd.to(device=device, dtype=dtype)
+            theta_prev = self._orbit_prev_theta.to(device=device, dtype=dtype).view(self.num_envs, 1)
 
-        orbit_cost = (w_err * e.square()).sum(dim=-1, keepdim=True)  # (E, 1)
-        cost_scale = float(self.cfg.task.get("reward_orbit_cost_scale", 1.0))
-        reward_orbit = 1.0 / (1.0 + cost_scale * orbit_cost)
+            # z_target can be fixed (cfg orbit_z) or "initial depth" (captured at reset).
+            if self._orbit_z_target_mode in ("initial", "init", "reset"):
+                z_target = self._orbit_z_target.to(device=device, dtype=dtype).view(self.num_envs, 1)
+            else:
+                z_target = z_t.view(1, 1).expand(self.num_envs, 1)
 
-        reward_effort = self.reward_effort_weight * torch.exp(-self.effort)
-        reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
-        reward = reward_orbit + reward_effort + reward_action_smoothness  # (E, 1)
+            cfg_reward = OrbitPPORewardCfg(
+                sigma_r=float(self.cfg.task.get("reward_orbit_sigma_r", 0.20)),
+                sigma_z=float(self.cfg.task.get("reward_orbit_sigma_z", 0.20)),
+                sigma_roll=float(self.cfg.task.get("reward_orbit_sigma_roll", 0.35)),
+                sigma_pitch=float(self.cfg.task.get("reward_orbit_sigma_pitch", 0.35)),
+                theta_scale=float(self.cfg.task.get("reward_orbit_theta_scale", float(5.0 * torch.pi / 180.0))),
+                v_tan_ref=float(self.cfg.task.get("reward_orbit_v_tan_ref", float(abs(self.orbit_v_tan)) if abs(self.orbit_v_tan) > 1e-6 else 0.5)),
+                progress_mode=str(self.cfg.task.get("reward_orbit_progress_mode", "theta")),
+                yaw_offset=float(self.cfg.task.get("reward_orbit_yaw_offset", float(self.orbit_yaw_offset))),
+                progress_gate_mode=str(self.cfg.task.get("reward_orbit_progress_gate_mode", "none")),
+                gate_heading_power=float(self.cfg.task.get("reward_orbit_gate_heading_power", 2.0)),
+                gate_radius_power=float(self.cfg.task.get("reward_orbit_gate_radius_power", 1.0)),
+                gate_heading_min=float(self.cfg.task.get("reward_orbit_gate_heading_min", 0.8)),
+                gate_radius_min=float(self.cfg.task.get("reward_orbit_gate_radius_min", 0.8)),
+                w_r=float(self.cfg.task.get("reward_orbit_w_radius", 1.0)),
+                w_z=float(self.cfg.task.get("reward_orbit_w_depth", 1.0)),
+                w_h=float(self.cfg.task.get("reward_orbit_w_heading", 0.5)),
+                w_p=float(self.cfg.task.get("reward_orbit_w_progress", 0.5)),
+                w_a=float(self.cfg.task.get("reward_orbit_w_att", 0.25)),
+                w_back=float(self.cfg.task.get("reward_orbit_w_backwards", 0.0)),
+                w_u=float(self.cfg.task.get("reward_orbit_w_u", 0.05)),
+                w_du=float(self.cfg.task.get("reward_orbit_w_du", 0.10)),
+                w_w=float(self.cfg.task.get("reward_orbit_w_omega", 0.02)),
+                w_vrad=float(self.cfg.task.get("reward_orbit_w_v_rad", 0.0)),
+                v_rad_ref=float(self.cfg.task.get("reward_orbit_v_rad_ref", 0.3)),
+                r_min=float(self.cfg.task.get("reward_orbit_r_min", float(self.cylinder_radius))),
+                r_max=float(self.cfg.task.get("reward_orbit_r_max", float(self.orbit_radius + 2.0))),
+                rp_max_deg=float(self.cfg.task.get("reward_orbit_rp_max_deg", 45.0)),
+                terminate_penalty=float(self.cfg.task.get("reward_orbit_terminate_penalty", -2.0)),
+                clip_min=float(self.cfg.task.get("reward_orbit_clip_min", -5.0)),
+                clip_max=float(self.cfg.task.get("reward_orbit_clip_max", 5.0)),
+            )
+
+            reward, terms = compute_orbit_ppo_reward_terms(
+                p_world=root_state[:, 0:3],
+                q_world_wxyz=root_state[:, 3:7],
+                v_body=root_state[:, 7:10],
+                w_body=root_state[:, 10:13],
+                c_world=center_env,
+                r_target=radius_t.view(1, 1).expand(self.num_envs, 1),
+                z_target=z_target,
+                orbit_direction=dir_sign_t.view(1, 1).expand(self.num_envs, 1),
+                dt=float(self.dt),
+                u_cmd=u_cmd,
+                u_prev=u_prev,
+                theta_prev=theta_prev,
+                cfg=cfg_reward,
+            )
+            reward_orbit = reward.view(self.num_envs, 1)
+            # Lap bonus: accumulate directed delta-theta and add a sparse bonus on each completed lap.
+            lap_bonus_term = torch.zeros_like(reward_orbit)
+            if float(getattr(self, "reward_orbit_lap_bonus", 0.0)) != 0.0:
+                try:
+                    progress_gate = terms.get("progress_gate", torch.ones_like(reward_orbit)).to(dtype=reward_orbit.dtype)
+                    dtheta_dir = dir_sign_t.view(1, 1).expand(self.num_envs, 1) * terms["delta_theta"].to(
+                        dtype=reward_orbit.dtype
+                    )
+                    lap_progress = self._orbit_lap_progress.to(device=device, dtype=reward_orbit.dtype).view(self.num_envs, 1)
+                    lap_progress = (lap_progress + dtheta_dir).clamp_min(0.0)
+
+                    two_pi = float(2.0 * torch.pi)
+                    laps = torch.floor(lap_progress / two_pi).clamp_min(0.0)
+                    lap_progress = lap_progress - laps * two_pi
+
+                    laps_i = laps.to(dtype=torch.int32).view(self.num_envs)
+                    self._orbit_lap_progress.copy_(lap_progress.view(self.num_envs).to(dtype=self._orbit_lap_progress.dtype))
+                    self._orbit_lap_count.add_(laps_i.to(device=self._orbit_lap_count.device))
+
+                    # Gate the lap bonus so we only reward a completed lap when radius+heading tracking are good.
+                    lap_bonus_term = laps * float(self.reward_orbit_lap_bonus) * progress_gate
+                    reward_orbit = reward_orbit + lap_bonus_term
+                    terms["lap_bonus"] = lap_bonus_term
+                    terms["lap_count"] = self._orbit_lap_count.to(device=device, dtype=reward_orbit.dtype).view(self.num_envs, 1)
+                    terms["lap_progress"] = lap_progress
+                except Exception:
+                    pass
+            # Update prev buffers for next step.
+            try:
+                self._orbit_prev_theta.copy_(terms["theta"].view(self.num_envs).to(dtype=self._orbit_prev_theta.dtype))
+                self._orbit_prev_u_cmd.copy_(u_cmd.to(dtype=self._orbit_prev_u_cmd.dtype))
+            except Exception:
+                pass
+
+            terminate_orbit_ppo = terms["terminate_orbit_ppo"].view(self.num_envs, 1).to(dtype=torch.bool)
+        else:
+            # Original orbit-cost reward: use the MPC error vector and fixed quadratic weights.
+            q_radial = float(self.cfg.task.get("reward_q_radial", self.cfg.task.get("mpc_q_radial", 50.0)))
+            q_z = float(self.cfg.task.get("reward_q_z", self.cfg.task.get("mpc_q_z", 30.0)))
+            q_tan = float(self.cfg.task.get("reward_q_tan", self.cfg.task.get("mpc_q_tan", 10.0)))
+            q_radial_speed = float(
+                self.cfg.task.get("reward_q_radial_speed", self.cfg.task.get("mpc_q_radial_speed", 5.0))
+            )
+            q_heading = float(self.cfg.task.get("reward_q_heading", self.cfg.task.get("mpc_q_heading", 30.0)))
+            q_roll = float(self.cfg.task.get("reward_q_roll", self.cfg.task.get("mpc_q_roll", 60.0)))
+            q_pitch = float(self.cfg.task.get("reward_q_pitch", self.cfg.task.get("mpc_q_pitch", 60.0)))
+            q_wxy = float(self.cfg.task.get("reward_q_wxy", self.cfg.task.get("mpc_q_wxy", 0.5)))
+
+            w_err = torch.as_tensor(
+                [
+                    q_radial,
+                    q_z,
+                    q_tan,
+                    q_radial_speed,
+                    q_heading,
+                    q_heading,
+                    q_roll,
+                    q_pitch,
+                    q_wxy,
+                    q_wxy,
+                ],
+                device=device,
+                dtype=dtype,
+            )
+
+            orbit_cost = (w_err * e.square()).sum(dim=-1, keepdim=True)  # (E, 1)
+            cost_scale = float(self.cfg.task.get("reward_orbit_cost_scale", 1.0))
+            reward_orbit = 1.0 / (1.0 + cost_scale * orbit_cost)
+
+        # For orbit_ppo, `reward_orbit` already includes all shaping and penalties.
+        if self.reward_mode == "orbit_ppo":
+            reward_effort = torch.zeros_like(reward_orbit)
+            reward_action_smoothness = torch.zeros_like(reward_orbit)
+            reward = reward_orbit
+        else:
+            reward_effort = self.reward_effort_weight * torch.exp(-self.effort)
+            reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
+            reward = reward_orbit + reward_effort + reward_action_smoothness  # (E, 1)
 
         # Extra action-magnitude reward term (optional).
         if self.reward_action_mag_weight != 0.0 and self.reward_action_mag_scale > 0.0:
@@ -388,6 +632,68 @@ class OrbitCylinderMPC(HoverMPC):
             except Exception:
                 pass
 
+        # Optional: if we have been stationary (XY) for too long, subtract a penalty.
+        penalty_stationary = torch.zeros_like(reward)
+        stationary_steps_term = torch.zeros_like(reward)
+        delta_xy_term = torch.zeros_like(reward)
+        if (
+            self.reward_mode == "orbit_ppo"
+            and float(getattr(self, "reward_orbit_stationary_w", 0.0)) != 0.0
+            and float(getattr(self, "reward_orbit_stationary_xy_eps", 0.0)) > 0.0
+            and hasattr(self, "_orbit_stationary_steps_buf")
+            and hasattr(self, "_orbit_stationary_prev_xy")
+        ):
+            try:
+                pos_xy = root_state[:, 0:2]  # (E, 2)
+                prev_xy = self._orbit_stationary_prev_xy.to(device=pos_xy.device, dtype=pos_xy.dtype)
+                delta_xy = torch.linalg.norm(pos_xy - prev_xy, dim=-1)  # (E,)
+                self._orbit_stationary_prev_xy.copy_(pos_xy.to(dtype=self._orbit_stationary_prev_xy.dtype))
+
+                grace = int(getattr(self, "reward_orbit_stationary_grace_steps", 0))
+                if grace > 0:
+                    active = self.progress_buf >= float(grace)
+                else:
+                    active = torch.ones_like(delta_xy, dtype=torch.bool, device=delta_xy.device)
+                still = active & (delta_xy < float(self.reward_orbit_stationary_xy_eps))
+
+                steps = self._orbit_stationary_steps_buf.to(device=delta_xy.device)
+                steps = torch.where(still, steps + 1, torch.zeros_like(steps))
+                self._orbit_stationary_steps_buf.copy_(steps.to(dtype=self._orbit_stationary_steps_buf.dtype))
+
+                start_steps = int(getattr(self, "reward_orbit_stationary_start_steps", 0))
+                full_steps = int(getattr(self, "reward_orbit_stationary_full_steps", start_steps + 1))
+                if full_steps <= start_steps:
+                    full_steps = start_steps + 1
+                denom = max(1, full_steps - start_steps)
+                ratio = ((steps - start_steps).clamp(min=0).to(dtype=reward.dtype) / float(denom)).clamp(0.0, 1.0)
+
+                penalty_stationary = ratio.view(self.num_envs, 1)
+                stationary_steps_term = steps.to(dtype=reward.dtype).view(self.num_envs, 1)
+                delta_xy_term = delta_xy.to(dtype=reward.dtype).view(self.num_envs, 1)
+
+                reward = reward - float(self.reward_orbit_stationary_w) * penalty_stationary
+                # Keep final reward bounded.
+                reward = reward.clamp(
+                    min=float(self.cfg.task.get("reward_orbit_clip_min", -5.0)),
+                    max=float(self.cfg.task.get("reward_orbit_clip_max", 5.0)),
+                )
+            except Exception:
+                pass
+        if self.reward_mode == "orbit_ppo":
+            try:
+                terms["penalty_stationary"] = penalty_stationary
+                terms["stationary_steps"] = stationary_steps_term
+                terms["delta_xy"] = delta_xy_term
+            except Exception:
+                pass
+
+        # Final reward clipping (orbit_ppo can add lap bonus / stationary penalty after core shaping).
+        if self.reward_mode == "orbit_ppo":
+            reward = reward.clamp(
+                min=float(self.cfg.task.get("reward_orbit_clip_min", -5.0)),
+                max=float(self.cfg.task.get("reward_orbit_clip_max", 5.0)),
+            )
+
         # Termination: keep Hover's rules (z floor, far-away, NaN, timeout).
         try:
             distance = torch.norm(torch.cat([self.rpos, self.rheading], dim=-1), dim=-1)
@@ -399,6 +705,11 @@ class OrbitCylinderMPC(HoverMPC):
 
         terminated = misbehave | hasnan
         truncated = (self.progress_buf >= self.max_episode_length).unsqueeze(-1)
+        if self.reward_mode == "orbit_ppo":
+            try:
+                terminated = terminated | terminate_orbit_ppo
+            except Exception:
+                pass
 
         # Optional: terminate if the vehicle is (almost) stationary for too long.
         if (
@@ -438,6 +749,40 @@ class OrbitCylinderMPC(HoverMPC):
         self.stats["heading_alignment"].lerp_(heading_alignment, (1 - self.alpha))
         self.stats["uprightness"].lerp_(self.drone_state[..., 18], (1 - self.alpha))
         self.stats["action_smoothness"].lerp_(-self.drone.throttle_difference, (1 - self.alpha))
+        if self.reward_mode == "orbit_ppo":
+            try:
+                # terms are (E,1)
+                self.stats["reward_step"].lerp_(reward, (1 - self.alpha))
+                self.stats["r_radius"].lerp_(terms["r_radius"], (1 - self.alpha))
+                self.stats["r_depth"].lerp_(terms["r_depth"], (1 - self.alpha))
+                self.stats["r_heading"].lerp_(terms["r_heading"], (1 - self.alpha))
+                self.stats["r_progress"].lerp_(terms["r_progress"], (1 - self.alpha))
+                self.stats["r_progress_raw"].lerp_(terms.get("r_progress_raw", terms["r_progress"]), (1 - self.alpha))
+                self.stats["progress_gate"].lerp_(terms.get("progress_gate", torch.ones_like(reward)), (1 - self.alpha))
+                self.stats["r_progress_back"].lerp_(terms["r_progress_back"], (1 - self.alpha))
+                self.stats["lap_bonus"].lerp_(terms.get("lap_bonus", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["lap_count"].lerp_(terms.get("lap_count", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["lap_progress"].lerp_(terms.get("lap_progress", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["r_att"].lerp_(terms["r_att"], (1 - self.alpha))
+                self.stats["cos_yaw"].lerp_(terms["cos_yaw"], (1 - self.alpha))
+                self.stats["delta_theta"].lerp_(terms["delta_theta"].abs(), (1 - self.alpha))
+                self.stats["v_tan"].lerp_(terms["v_tan"], (1 - self.alpha))
+                self.stats["v_rad"].lerp_(terms.get("v_rad", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["delta_xy"].lerp_(terms["delta_xy"], (1 - self.alpha))
+                self.stats["dist_xy"].lerp_(terms["dist_xy"], (1 - self.alpha))
+                self.stats["e_r"].lerp_(terms["e_r"], (1 - self.alpha))
+                self.stats["e_z"].lerp_(terms["e_z"], (1 - self.alpha))
+                self.stats["roll"].lerp_(terms["roll"].abs(), (1 - self.alpha))
+                self.stats["pitch"].lerp_(terms["pitch"].abs(), (1 - self.alpha))
+                self.stats["penalty_u"].lerp_(terms["penalty_u"], (1 - self.alpha))
+                self.stats["penalty_du"].lerp_(terms["penalty_du"], (1 - self.alpha))
+                self.stats["penalty_omega"].lerp_(terms["penalty_omega"], (1 - self.alpha))
+                self.stats["penalty_v_rad"].lerp_(terms.get("penalty_v_rad", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["penalty_stationary"].lerp_(terms["penalty_stationary"], (1 - self.alpha))
+                self.stats["stationary_steps"].lerp_(terms["stationary_steps"], (1 - self.alpha))
+                self.stats["terminate_orbit_ppo"].lerp_(terms["terminate_orbit_ppo"], (1 - self.alpha))
+            except Exception:
+                pass
         self.stats["return"] += reward
         self.stats["episode_len"][:] = self.progress_buf.unsqueeze(1)
 
@@ -446,6 +791,7 @@ class OrbitCylinderMPC(HoverMPC):
                 "agents": {
                     "reward": reward.unsqueeze(-1),
                 },
+                "stats": self.stats.clone(),
                 "done": terminated | truncated,
                 "terminated": terminated,
                 "truncated": truncated,

@@ -70,11 +70,15 @@ def init_wandb(cfg):
     kwargs = dict(
         project=wandb_cfg.project,
         group=wandb_cfg.group,
-        entity=wandb_cfg.entity,
         name=run_name,
         mode=wandb_cfg.mode,
         tags=wandb_cfg.tags,
     )
+    entity = getattr(wandb_cfg, "entity", None)
+    if entity is not None:
+        entity_str = str(entity).strip()
+        if entity_str and entity_str != "your_wandb_entity_here":
+            kwargs["entity"] = entity_str
     if wandb_cfg.run_id is not None:
         kwargs["id"] = wandb_cfg.run_id
         kwargs["resume"] = "must"

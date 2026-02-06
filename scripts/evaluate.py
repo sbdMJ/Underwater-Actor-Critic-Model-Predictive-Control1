@@ -2,6 +2,12 @@ import logging
 import os
 import time
 from pathlib import Path
+import sys
+
+# Ensure this repo's `marinegym/` is importable when running via `python scripts/evaluate.py`.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import hydra
 import torch
@@ -124,10 +130,16 @@ def evaluate_model(env, policy, num_episodes, cfg):
     env.set_seed(0)
     env.enable_render(True)
     render_callback = RenderCallback(interval=1)
+    max_steps = int(getattr(env.base_env, "max_episode_length", 0) or 0)
+    try:
+        if hasattr(cfg, "eval") and cfg.eval is not None and hasattr(cfg.eval, "steps") and int(cfg.eval.steps) > 0:
+            max_steps = int(cfg.eval.steps)
+    except Exception:
+        pass
     for i in tqdm(range(num_episodes)):
         with set_exploration_type(ExplorationType.MODE):
             traj = env.rollout(
-                max_steps=env.base_env.max_episode_length,
+                max_steps=max_steps,
                 policy=policy,
                 auto_reset=True,
                 break_when_any_done=False
