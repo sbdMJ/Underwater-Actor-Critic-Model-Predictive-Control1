@@ -29,20 +29,80 @@ drone_model:
 force_sensor: false
 time_encoding: true
 
-reward_effort_weight: 0.1
+reward_effort_weight: 0.0
 reward_action_smoothness_weight: 0.0
 reward_distance_scale: 1.2
 # Optional: extra action-magnitude shaping term (encourages higher learned w_u/r_u in steady-state).
 # reward_action_mag = w * gate * exp(-scale * mean(|u|)).
-reward_action_mag_weight: 0.0
-reward_action_mag_scale: 4.0
-reward_action_mag_gate_by_orbit: true
+# reward_action_mag_weight: 0.0
+# reward_action_mag_scale: 4.0
+# reward_action_mag_gate_by_orbit: true
 # Reward mode:
 #   - hover: Hover-style reward to a target (auto -> moving waypoint when use_internal_mpc=false)
 #   - orbit_cost: cylinder-orbit cost based reward (radial/z/tangent/heading/roll/pitch/wxy + effort)
-reward_mode: orbit_cost
+reward_mode: orbit_ppo
 # Scaling for orbit_cost reward: reward_orbit = 1 / (1 + scale * cost)
-reward_orbit_cost_scale: 1.0
+# reward_orbit_cost_scale: 1.0
+
+reward_orbit_z_target_mode: fixed
+
+reward_orbit_sigma_r: 0.20
+reward_orbit_sigma_z: 0.20
+
+reward_orbit_sigma_roll: 0.35   # rad (~20deg)
+reward_orbit_sigma_pitch: 0.35  # rad (~20deg)
+
+reward_orbit_progress_mode: both
+reward_orbit_theta_scale: 0.0872664626  # 5deg in rad
+reward_orbit_v_tan_ref: 0.5 
+reward_orbit_yaw_offset: 0.0
+
+reward_orbit_progress_gate_mode: mul
+reward_orbit_gate_heading_power: 2.0
+reward_orbit_gate_radius_power: 1.0
+reward_orbit_gate_heading_min: 0.8
+reward_orbit_gate_radius_min: 0.8
+
+# Positive term weights (keep heading/progress moderate for stability).
+reward_orbit_w_radius: 1.0
+reward_orbit_w_depth: 1.0
+reward_orbit_w_heading: 0.5
+reward_orbit_w_progress: 0.5
+# Penalize progress in the wrong direction (helps enforce clockwise).
+reward_orbit_w_backwards: 0.5
+reward_orbit_w_att: 0.25
+
+# Sparse lap bonus: +bonus each time the vehicle completes a full 2*pi orbit (in desired direction).
+reward_orbit_lap_bonus: 1.0
+
+# Penalty weights.
+reward_orbit_w_u: 0.05
+reward_orbit_w_du: 0.10
+reward_orbit_w_omega: 0.02
+# Penalize radial (in/out) motion in the XY plane: penalty = (v_rad/v_ref)^2 (clipped to [0,1])
+reward_orbit_w_v_rad: 0.20
+reward_orbit_v_rad_ref: 0.30
+
+# Termination thresholds / penalties (done + penalty).
+# NOTE: r_min/r_max are absolute radii (meters).
+reward_orbit_r_min: 0.50
+reward_orbit_r_max: 2.00
+reward_orbit_rp_max_deg: 45.0
+reward_orbit_terminate_penalty: -2.0
+
+# Reward clipping.
+reward_orbit_clip_min: -5.0
+reward_orbit_clip_max: 5.0
+
+# Optional: stationary penalty (discourage staying at the same XY position too long).
+# - delta_xy < xy_eps is considered "still"
+# - after grace_steps, count consecutive still steps
+# - penalty ramps from 0->1 over [start_steps, full_steps] and is scaled by w_stationary
+reward_orbit_w_stationary: 3.0
+reward_orbit_stationary_xy_eps: 0.002
+reward_orbit_stationary_grace_steps: 60
+reward_orbit_stationary_start_steps: 60
+reward_orbit_stationary_full_steps: 240
 
 # Cylinder-aware MPC 설정
 mpc_horizon: 3
@@ -123,14 +183,16 @@ init_pos_max: [1.8, 0.3, 1.6]
 init_rpy_min: [0.0, 0.0, 0.0]
 init_rpy_max: [0.0, 0.0, 0.0]
 
+spawn_fixed: true
+
 # MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
 terminate_distance: 7.0 #2.3
 terminate_min_z: 0.1
 
 # Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
 # This helps avoid "do nothing" local optima during RL training (earning only effort reward).
-terminate_stationary_enable: true
-terminate_stationary_xy_eps: 0.002
+terminate_stationary_enable: false
+terminate_stationary_xy_eps: 0.01
 terminate_stationary_steps: 300
 terminate_stationary_grace_steps: 60
 
