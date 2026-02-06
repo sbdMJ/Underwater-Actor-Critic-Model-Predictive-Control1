@@ -34,8 +34,8 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
 
     name: str = "ppo_pypose_cylinder_mpc_werr_wu_tv"
     train_every: int = 32
-    ppo_epochs: int = 4
-    num_minibatches: int = 16
+    ppo_epochs: int = 2
+    num_minibatches: int = 8
 
     priv_actor: bool = False
     priv_critic: bool = False
@@ -55,6 +55,7 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     obs_has_cylinder_rel: bool = False
 
     # PyPose MPC settings (populated by scripts/train.py / CLI).
+    mpc_dtype: str = "float32"
     mpc_dt: float = 0.05
     mpc_horizon: int = 5
     mpc_nu: int = 6
@@ -90,7 +91,7 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     R_min_coeff: float = 0.5
     gamma_d_max: float = 5.0
 
-    critic_worstcase_k: int = 3
+    critic_worstcase_k: int = 1
 
     # Optional init (populated by scripts/train.py).
     werr_init: Optional[List[float]] = None  # (10,)
@@ -134,6 +135,29 @@ def _map_raw_to_positive(raw: torch.Tensor, lb: float, ub: float, *, log_scale: 
         log_ub = math.log(ub)
         return torch.exp(log_lb + (log_ub - log_lb) * s)
     return lb + (ub - lb) * s
+
+
+def _parse_torch_dtype(dtype_str: str) -> torch.dtype:
+    s = str(dtype_str).strip().lower()
+    if s.startswith("torch."):
+        s = s[len("torch.") :]
+
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float": torch.float32,
+        "float64": torch.float64,
+        "fp64": torch.float64,
+        "double": torch.float64,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+    }
+    if s not in dtype_map:
+        raise ValueError(f"Unsupported cfg.mpc_dtype={dtype_str!r}. Use one of: {sorted(dtype_map.keys())}")
+    return dtype_map[s]
 
 
 def _load_uav_params(cfg: PPOPyposeCylinderMPCWErrWUTVConfig) -> dict:
@@ -249,8 +273,10 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         self.device = device
 
         uav_params = _load_uav_params(cfg)
+        mpc_dtype = _parse_torch_dtype(cfg.mpc_dtype)
         self.mpc = PyPoseCylinderOrbitMPCController(
             uav_params=uav_params,
+            mpc_dtype=mpc_dtype,
             dt=float(cfg.mpc_dt),
             horizon=int(cfg.mpc_horizon),
             batch_size=1,  # compute adapts on first call
@@ -287,8 +313,7 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         obs = obs.squeeze(-2)
         batch_shape = obs.shape[:-1]
         obs_flat = obs.reshape(-1, obs.shape[-1])
-        if not torch.isfinite(obs_flat).all():
-            obs_flat = torch.nan_to_num(obs_flat)
+        obs_flat = torch.nan_to_num(obs_flat)
 
         rpos = obs_flat[:, 0:3]
         quat = normalize(obs_flat[:, 3:7])
@@ -334,8 +359,7 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
             )
         except Exception:
             u0 = torch.zeros((root_state.shape[0], self.nu), device=root_state.device, dtype=root_state.dtype)
-        if not torch.isfinite(u0).all():
-            u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
+        u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
 
         loc = u0.view(*batch_shape, 1, self.nu).to(dtype=obs.dtype)
 
