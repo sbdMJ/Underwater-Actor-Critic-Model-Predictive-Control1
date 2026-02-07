@@ -748,13 +748,15 @@ def main(cfg):
             if os.path.exists(stop_file):
                 logging.info(f"Stop file detected: {stop_file}")
                 break
-            info = {"env_frames": collector._frames, "rollout_fps": collector._fps}
+            info = {"env_frames": collector._frames, "rollout_fps": collector._fps, "iter": i}
             if episode_stats is not None:
                 episode_stats.add(data.to_tensordict())
-                if len(episode_stats) >= base_env.num_envs:
+                if len(episode_stats) > 0:
+                    ep_stats = episode_stats.pop()
+                    info["train/episodes"] = int(ep_stats.shape[0])
                     stats = {
                         "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
-                        for k, v in episode_stats.pop().items(True, True)
+                        for k, v in ep_stats.items(True, True)
                     }
                     info.update(stats)
 
@@ -811,7 +813,7 @@ def main(cfg):
             _maybe_save_checkpoint()
 
             if is_rank0:
-                run.log(info)
+                run.log(info, step=i)
                 if print_float_metrics and log_interval > 0 and i % log_interval == 0:
                     print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, float)}))
                 if metrics_f is not None:
