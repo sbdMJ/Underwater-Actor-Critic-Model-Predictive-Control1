@@ -1,7 +1,0 @@
-- task=Hover_MPC_QP
-- algo=ppo
-- headless=false
-- enable_livestream=false
-- env.num_envs=1
-- +eval.ckpt=checkpoints/checkpoint_final.pt
-- +eval.steps=2000

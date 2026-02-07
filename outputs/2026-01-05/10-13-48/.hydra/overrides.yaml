@@ -1,8 +1,0 @@
-- +eval.ckpt=/home/mjkim/MarineGym/wandb/offline-run-20260102_162558-s7rj28vq/files/checkpoint_final.pt
-- task=PathFollow
-- algo=ppo
-- headless=false
-- enable_livestream=false
-- +eval.num_episodes=10
-- env.num_envs=1
-- env.max_episode_length=1500

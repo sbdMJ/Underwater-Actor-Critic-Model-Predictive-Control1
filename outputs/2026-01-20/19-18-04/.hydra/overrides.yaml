@@ -1,6 +1,0 @@
-- task=Hover_PyPose_MPC
-- algo=ppo_pypose_mpc_qrconst
-- task.use_internal_mpc=false
-- headless=false
-- enable_livestream=false
-- env.num_envs=1

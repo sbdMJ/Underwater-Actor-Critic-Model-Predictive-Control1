@@ -1,1 +1,16 @@
-~/isaac410/python.sh scripts/evaluate.py   +eval.ckpt=/home/mjkim/MarineGym/scripts/wandb/offline-run-20251208_195159-0dxwmiw3/files/checkpoint_final.pt   task=Hover algo=ppo headless=false
+# Evaluate (saves trajectory + heading + speed(colormap) when mode=evaluate)
+~/isaac410/python.sh scripts/evaluate.py task=OrbitCylinder_MPC_PPO algo=ppo headless=false enable_livestream=false env.num_envs=1 mode=evaluate \\
+  +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000
+
+# Output files are written to Hydra's run directory (./outputs/...):
+# - trajectory.npz
+# - trajectory.png  (speed is shown as colormap if available; set +eval.plot_traj=false to disable)
+#
+# Optional overrides:
+#   +eval.traj_path=/tmp/orbit_traj.npz
+#   +eval.traj_png_path=/tmp/orbit_traj.png
+#   +eval.traj_env_id=0 +eval.traj_stride=1
+#   +eval.plot_heading_stride=50 +eval.plot_arrow_len=0.25
+
+# Re-visualize later:
+python scripts/visualize_trajectory.py /path/to/trajectory.npz --out /path/to/trajectory.png

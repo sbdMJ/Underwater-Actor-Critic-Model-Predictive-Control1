@@ -1,6 +1,0 @@
-- task=Hover_PyPose_MPC
-- algo=ppo_pypose_mpc_qrdiag
-- task.use_internal_mpc=false
-- headless=false
-- env.num_envs=1
-- ppo_test_steps=32

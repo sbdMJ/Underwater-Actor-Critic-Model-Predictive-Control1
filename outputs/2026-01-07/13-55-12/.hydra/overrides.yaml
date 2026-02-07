@@ -1,5 +1,0 @@
-- task=Hover
-- algo=ac_mpc
-- headless=true
-- enable_livestream=false
-- env.num_envs=8

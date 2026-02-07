@@ -22,6 +22,16 @@ FILE_PATH = os.path.dirname(__file__)
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
 
 
+def _to_numpy(x):
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
 def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Path):
     from marinegym.controllers.thruster_allocation import compute_thruster_allocation_matrix_from_drone
 
@@ -271,12 +281,19 @@ def main(cfg):
 
         ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1 mode=evaluate   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200   +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
 
+    Trajectory logging (default on when mode=evaluate):
+      - Saves `trajectory.npz` and `trajectory.png` under Hydra's run dir (./outputs/...). (speed is shown as colormap if available)
+      - Disable with `+eval.save_traj=false`.
+      - Override paths with `+eval.traj_path=/tmp/trajectory.npz +eval.traj_png_path=/tmp/trajectory.png`.
+      - Re-visualize later: `python scripts/visualize_trajectory.py /path/to/trajectory.npz`
+
     """
     OmegaConf.register_new_resolver("eval", eval)
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
     eval_cfg = cfg.get("eval", {}) or {}
+    mode = str(cfg.get("mode", "")).lower()
     ckpt = eval_cfg.get("ckpt", None)
     if not ckpt:
         ckpt = str(Path.cwd() / "checkpoints" / "checkpoint_final.pt")
@@ -291,6 +308,26 @@ def main(cfg):
     render = bool(eval_cfg.get("render", not cfg.headless))
     render_interval = int(eval_cfg.get("render_interval", 2))
     video_path = str(eval_cfg.get("video_path", "") or "")
+
+    save_traj = eval_cfg.get("save_traj", None)
+    if save_traj is None:
+        save_traj = mode == "evaluate"
+    save_traj = bool(save_traj)
+    traj_env_id = int(eval_cfg.get("traj_env_id", 0))
+    traj_stride = max(1, int(eval_cfg.get("traj_stride", 1)))
+    traj_out = eval_cfg.get("traj_path", None)
+    traj_path = Path(str(traj_out)).expanduser() if traj_out else Path("trajectory.npz")
+    if not traj_path.is_absolute():
+        traj_path = Path.cwd() / traj_path
+
+    traj_png_out = eval_cfg.get("traj_png_path", None)
+    traj_png_path = Path(str(traj_png_out)).expanduser() if traj_png_out else traj_path.with_suffix(".png")
+    if not traj_png_path.is_absolute():
+        traj_png_path = Path.cwd() / traj_png_path
+    plot_traj = bool(eval_cfg.get("plot_traj", True))
+    plot_heading_stride = int(eval_cfg.get("plot_heading_stride", 50))
+    plot_arrow_len = float(eval_cfg.get("plot_arrow_len", 0.25))
+    plot_show = bool(eval_cfg.get("plot_show", False))
 
     simulation_app = init_simulation_app(cfg)
 
@@ -321,6 +358,33 @@ def main(cfg):
     td = env.reset()
     episode_stats = []
     frames = []
+
+    pos_log = []
+    heading_log = []
+    speed_log = []
+    done_log = []
+    step_log = []
+
+    def _maybe_log_traj(*, step: int, done: bool) -> None:
+        if not save_traj:
+            return
+        if (int(step) % int(traj_stride)) != 0:
+            return
+        try:
+            base_env.drone.get_state()
+            pos_log.append(_to_numpy(base_env.drone.pos[traj_env_id, 0, :]).astype(np.float32, copy=False))
+            heading_log.append(_to_numpy(base_env.drone.heading[traj_env_id, 0, :]).astype(np.float32, copy=False))
+            try:
+                vel_lin_w = base_env.drone.vel_w[traj_env_id, 0, 0:3]
+                speed_log.append(float(torch.linalg.norm(vel_lin_w).item()))
+            except Exception:
+                speed_log.append(float("nan"))
+            done_log.append(bool(done))
+            step_log.append(int(step))
+        except Exception:
+            return
+
+    _maybe_log_traj(step=0, done=False)
 
     with set_exploration_type(ExplorationType.MODE):
         for t in range(steps):
@@ -357,6 +421,15 @@ def main(cfg):
                     pass
 
             done = td.get("done", None)
+            done_val = False
+            if done is not None:
+                try:
+                    done_mask_for_traj = done.squeeze(-1)
+                    done_val = bool(done_mask_for_traj[traj_env_id].item())
+                except Exception:
+                    done_val = False
+            _maybe_log_traj(step=t + 1, done=done_val)
+
             if done is not None and bool(done.any()):
                 done_mask = done.squeeze(-1)
                 try:
@@ -367,6 +440,7 @@ def main(cfg):
 
                 td.set("_reset", done_mask)
                 td = env.reset(td)
+                _maybe_log_traj(step=t + 1, done=False)
 
             if not bool(cfg.headless):
                 env.render()
@@ -387,6 +461,67 @@ def main(cfg):
             print(f"[eval] saved video: {video_path}")
         except Exception as e:
             print(f"[eval] failed to save video (install torchvision or disable eval.video_path): {e}")
+
+    if save_traj and pos_log:
+        try:
+            pos_arr = np.stack(pos_log, axis=0).astype(np.float32, copy=False)
+            heading_arr = np.stack(heading_log, axis=0).astype(np.float32, copy=False)
+            speed_arr = np.asarray(speed_log, dtype=np.float32)
+            done_arr = np.asarray(done_log, dtype=np.bool_)
+            step_arr = np.asarray(step_log, dtype=np.int64)
+
+            center = _to_numpy(getattr(base_env, "cylinder_center", np.zeros((1, 1, 3), dtype=np.float32)))
+            center = np.asarray(center, dtype=np.float32).reshape(-1)[:3]
+
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = traj_path.with_name(traj_path.stem + "_tmp" + traj_path.suffix)
+            np.savez_compressed(
+                tmp_path,
+                step=step_arr,
+                pos=pos_arr,
+                heading=heading_arr,
+                speed=speed_arr,
+                done=done_arr,
+                cylinder_center=center,
+                cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
+                cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),
+                orbit_radius=float(getattr(base_env, "orbit_radius", 0.0)),
+                orbit_z=float(getattr(base_env, "orbit_z", 0.0)),
+                meta=np.array(
+                    [
+                        {
+                            "task": str(getattr(getattr(cfg, "task", None), "name", "")),
+                            "algo": str(getattr(getattr(cfg, "algo", None), "name", "")),
+                            "ckpt": str(ckpt_path),
+                            "dt": float(getattr(getattr(cfg, "sim", None), "dt", 0.0)),
+                            "seed": int(seed),
+                            "steps": int(steps),
+                            "traj_env_id": int(traj_env_id),
+                            "traj_stride": int(traj_stride),
+                        }
+                    ],
+                    dtype=object,
+                ),
+            )
+            tmp_path.replace(traj_path)
+            print(f"[eval] saved trajectory: {traj_path.resolve()}")
+
+            if plot_traj:
+                try:
+                    from visualize_trajectory import plot_trajectory_3d
+
+                    plot_trajectory_3d(
+                        traj_path=traj_path,
+                        out_path=traj_png_path,
+                        heading_stride=int(plot_heading_stride),
+                        arrow_len=float(plot_arrow_len),
+                        show=bool(plot_show),
+                    )
+                    print(f"[eval] saved trajectory plot: {traj_png_path.resolve()}")
+                except Exception as exc:
+                    print(f"[eval] failed to plot trajectory: {exc}")
+        except Exception as exc:
+            print(f"[eval] failed to save trajectory: {exc}")
 
     simulation_app.close()
 
