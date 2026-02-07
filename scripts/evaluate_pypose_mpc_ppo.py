@@ -8,6 +8,7 @@ import torch
 from omegaconf import OmegaConf
 from torchrl.envs.transforms import Compose, InitTracker, TransformedEnv
 from torchrl.envs.utils import set_exploration_type, ExplorationType
+from tensordict import TensorDict
 
 from marinegym import init_simulation_app
 from marinegym.learning import ALGOS  # noqa: F401  (Hydra ConfigStore 등록용)
@@ -259,6 +260,95 @@ def _summarize_orbit_weights(w_err_seq: torch.Tensor, w_u_seq: torch.Tensor):
     return s0, sL
 
 
+def _build_observation_template(
+    rpos: torch.Tensor,
+    *,
+    observation_dim: int,
+    drone_state_dim: int,
+    include_target_quat: bool,
+    time_encoding_dim: int,
+    include_cylinder_rel: bool,
+    device: torch.device,
+):
+    obs = torch.zeros((rpos.shape[0], 1, observation_dim), device=device, dtype=rpos.dtype)
+    obs[:, 0, 0:3] = rpos
+    rheading_start = drone_state_dim
+    obs[:, 0, rheading_start : rheading_start + 3] = 0.0
+    idx = rheading_start + 3
+    if include_target_quat:
+        idx += 4
+    if time_encoding_dim > 0:
+        idx += time_encoding_dim
+    if include_cylinder_rel:
+        obs[:, 0, idx : idx + 3] = 0.0
+    return obs
+
+
+def _evaluate_value_grid(
+    policy,
+    *,
+    base_env,
+    grid_xy: tuple[np.ndarray, np.ndarray],
+    grid_rz: tuple[np.ndarray, np.ndarray],
+    observation_dim: int,
+    drone_state_dim: int,
+    include_target_quat: bool,
+    time_encoding_dim: int,
+    include_cylinder_rel: bool,
+):
+    xx, yy = grid_xy
+    rr, zz = grid_rz
+
+    rpos_xy = torch.from_numpy(
+        np.stack([xx.ravel(), yy.ravel(), np.zeros(xx.size)], axis=1)
+    ).to(device=base_env.device, dtype=torch.float32)
+    rpos_rz = torch.from_numpy(
+        np.stack([rr.ravel(), np.zeros(rr.size), zz.ravel()], axis=1)
+    ).to(device=base_env.device, dtype=torch.float32)
+
+    obs_xy = _build_observation_template(
+        -rpos_xy,
+        observation_dim=observation_dim,
+        drone_state_dim=drone_state_dim,
+        include_target_quat=include_target_quat,
+        time_encoding_dim=time_encoding_dim,
+        include_cylinder_rel=include_cylinder_rel,
+        device=base_env.device,
+    )
+    obs_rz = _build_observation_template(
+        -rpos_rz,
+        observation_dim=observation_dim,
+        drone_state_dim=drone_state_dim,
+        include_target_quat=include_target_quat,
+        time_encoding_dim=time_encoding_dim,
+        include_cylinder_rel=include_cylinder_rel,
+        device=base_env.device,
+    )
+
+    intrinsics = None
+    if ("agents", "intrinsics") in base_env.observation_spec.keys(True, True):
+        intrinsics = base_env.drone.intrinsics
+
+    def _run(obs: torch.Tensor) -> np.ndarray:
+        batch = obs.shape[0]
+        tensordict = TensorDict(
+            {("agents", "observation"): obs},
+            batch_size=[batch],
+        )
+        if intrinsics is not None:
+            tensordict.set(
+                ("agents", "intrinsics"),
+                intrinsics.expand(batch, -1, -1),
+            )
+        with torch.no_grad():
+            values = policy.critic(tensordict)["state_value"]
+        return values.squeeze(-1).squeeze(-1).cpu().numpy()
+
+    values_xy = _run(obs_xy).reshape(xx.shape)
+    values_rz = _run(obs_rz).reshape(rr.shape)
+    return values_xy, values_rz
+
+
 @hydra.main(version_base=None, config_path=FILE_PATH, config_name="train")
 def main(cfg):
     """
@@ -291,6 +381,10 @@ def main(cfg):
     render = bool(eval_cfg.get("render", not cfg.headless))
     render_interval = int(eval_cfg.get("render_interval", 2))
     video_path = str(eval_cfg.get("video_path", "") or "")
+    save_plot_data = bool(eval_cfg.get("save_plot_data", False))
+    plot_data_path = str(eval_cfg.get("plot_data_path", "outputs/ac_mpc_eval_plot_data.npz"))
+    plot_pred_stride = int(eval_cfg.get("plot_pred_stride", 10))
+    plot_grid_size = int(eval_cfg.get("plot_grid_size", 150))
 
     simulation_app = init_simulation_app(cfg)
 
@@ -321,6 +415,9 @@ def main(cfg):
     td = env.reset()
     episode_stats = []
     frames = []
+    actual_traj = []
+    velocities = []
+    mpc_preds = []
 
     with set_exploration_type(ExplorationType.MODE):
         for t in range(steps):
@@ -349,6 +446,30 @@ def main(cfg):
 
             td = policy(td)
             td = env.step(td)["next"]
+
+            if save_plot_data:
+                try:
+                    base_env.drone.get_state()
+                    pos = base_env.drone.pos.squeeze(1)[0].detach().cpu().numpy()
+                    vel = base_env.drone.vel_w.squeeze(1)[0, :3]
+                    speed = float(torch.linalg.norm(vel).detach().cpu().item())
+                    actual_traj.append(pos)
+                    velocities.append(speed)
+                except Exception:
+                    pass
+
+                if (
+                    mpc_actor is not None
+                    and (t % max(1, plot_pred_stride) == 0)
+                    and hasattr(mpc_actor, "mpc")
+                ):
+                    try:
+                        x_traj = mpc_actor.mpc.last_x_traj
+                        if x_traj is not None:
+                            pred = x_traj[0, :, :3].detach().cpu().numpy()
+                            mpc_preds.append(pred)
+                    except Exception:
+                        pass
 
             if render and video_path and render_interval > 0 and (t % render_interval) == 0:
                 try:
@@ -387,6 +508,62 @@ def main(cfg):
             print(f"[eval] saved video: {video_path}")
         except Exception as e:
             print(f"[eval] failed to save video (install torchvision or disable eval.video_path): {e}")
+
+    if save_plot_data and actual_traj:
+        actual_traj_np = np.asarray(actual_traj)
+        velocities_np = np.asarray(velocities)
+        x_min, x_max = actual_traj_np[:, 0].min(), actual_traj_np[:, 0].max()
+        y_min, y_max = actual_traj_np[:, 1].min(), actual_traj_np[:, 1].max()
+        pad = max(1.0, 0.3 * float(cfg.task.get("orbit_radius", 2.0)))
+        x_min, x_max = x_min - pad, x_max + pad
+        y_min, y_max = y_min - pad, y_max + pad
+        xs = np.linspace(x_min, x_max, plot_grid_size)
+        ys = np.linspace(y_min, y_max, plot_grid_size)
+        xx, yy = np.meshgrid(xs, ys)
+
+        r_max = max(float(cfg.task.get("orbit_radius", 2.0)) + pad, np.sqrt(x_max**2 + y_max**2))
+        zs = np.linspace(actual_traj_np[:, 2].min() - pad, actual_traj_np[:, 2].max() + pad, plot_grid_size)
+        rs = np.linspace(0.0, r_max, plot_grid_size)
+        rr, zz = np.meshgrid(rs, zs)
+
+        observation_dim = int(env.observation_spec[("agents", "observation")].shape[-1])
+        drone_state_dim = int(base_env.drone.state_spec.shape[-1])
+        include_target_quat = bool(getattr(base_env, "include_target_quat_in_obs", False))
+        time_encoding_dim = int(getattr(base_env, "time_encoding_dim", 0)) if bool(cfg.task.time_encoding) else 0
+        include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+
+        values_xy, values_rz = _evaluate_value_grid(
+            policy,
+            base_env=base_env,
+            grid_xy=(xx, yy),
+            grid_rz=(rr, zz),
+            observation_dim=observation_dim,
+            drone_state_dim=drone_state_dim,
+            include_target_quat=include_target_quat,
+            time_encoding_dim=time_encoding_dim,
+            include_cylinder_rel=include_cylinder_rel,
+        )
+
+        np.savez(
+            plot_data_path,
+            actual_traj=actual_traj_np,
+            velocities=velocities_np,
+            mpc_preds=np.asarray(mpc_preds, dtype=object),
+            values_xy=values_xy,
+            values_rz=values_rz,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            r_max=r_max,
+            z_min=zs.min(),
+            z_max=zs.max(),
+            grid_size=plot_grid_size,
+            cylinder_radius=float(cfg.task.get("cylinder_radius", 0.5)),
+            target_orbit=float(cfg.task.get("orbit_radius", 2.0)),
+            target_depth=float(cfg.task.get("orbit_z", actual_traj_np[:, 2].mean())),
+        )
+        print(f"[eval] saved plot data: {plot_data_path}")
 
     simulation_app.close()
 

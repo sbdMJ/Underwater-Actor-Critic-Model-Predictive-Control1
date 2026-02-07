@@ -337,6 +337,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self.register_buffer("_w_u", w_u)
 
         self._u_warm: torch.Tensor | None = None
+        self.last_x_traj: torch.Tensor | None = None
+        self.last_u_traj: torch.Tensor | None = None
         self.requires_grad_(False)
 
     def _dynamics(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
@@ -606,6 +608,11 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             x_meas_seq=x_meas_seq,
         )
         self._u_warm = torch.cat([u_traj[:, 1:, :], torch.zeros_like(u_traj[:, :1, :])], dim=1).detach()
+        self.last_u_traj = u_traj.detach()
+        try:
+            self.last_x_traj = self._rollout(x0d, u_traj).detach()
+        except Exception:
+            self.last_x_traj = None
 
         u0 = u_traj[:, 0, :].to(dtype=root_state.dtype)
         return torch.clamp(u0, -1.0, 1.0)
