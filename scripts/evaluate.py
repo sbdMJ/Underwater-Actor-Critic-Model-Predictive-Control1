@@ -12,9 +12,6 @@ if str(_REPO_ROOT) not in sys.path:
 import hydra
 import torch
 import numpy as np
-import pandas as pd
-import wandb
-import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from omegaconf import OmegaConf
@@ -40,9 +37,18 @@ from setproctitle import setproctitle
 from torchrl.envs.transforms import TransformedEnv, InitTracker, Compose
 
 
-import torch
-
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
+
+
+def _to_numpy(x):
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
 
 def load_checkpoint(checkpoint_path, env_config, algo_config):
     from marinegym.envs.isaac_env import IsaacEnv
@@ -198,6 +204,28 @@ def evaluate_model(env, policy, num_episodes, cfg):
     env.eval()
     env.set_seed(0)
     env.enable_render(True)
+
+    eval_cfg = cfg.get("eval", {}) if hasattr(cfg, "get") else getattr(cfg, "eval", {})
+    mode = str(cfg.get("mode", "")).lower() if hasattr(cfg, "get") else str(getattr(cfg, "mode", "")).lower()
+    save_traj = eval_cfg.get("save_traj", None)
+    if save_traj is None:
+        save_traj = mode == "evaluate"
+    save_traj = bool(save_traj)
+
+    traj_env_id = int(eval_cfg.get("traj_env_id", 0))
+    traj_stride = max(1, int(eval_cfg.get("traj_stride", 1)))
+    traj_out = eval_cfg.get("traj_path", None)
+    traj_path = Path(traj_out).expanduser() if traj_out else Path("trajectory.npz")
+    if not traj_path.is_absolute():
+        traj_path = Path.cwd() / traj_path
+
+    pos_log = []
+    heading_log = []
+    speed_log = []
+    done_log = []
+    step_log = []
+    global_step = 0
+
     max_steps = int(getattr(env.base_env, "max_episode_length", 0) or 0)
     try:
         if hasattr(cfg, "eval") and cfg.eval is not None and hasattr(cfg.eval, "steps") and int(cfg.eval.steps) > 0:
@@ -214,6 +242,23 @@ def evaluate_model(env, policy, num_episodes, cfg):
     for _ in tqdm(range(num_episodes)):
         episode_stats = []
         td = env.reset()
+        if save_traj:
+            try:
+                env.base_env.drone.get_state()
+                if (global_step % traj_stride) == 0:
+                    pos_log.append(_to_numpy(env.base_env.drone.pos[traj_env_id, 0, :]).astype(np.float32, copy=False))
+                    heading_log.append(
+                        _to_numpy(env.base_env.drone.heading[traj_env_id, 0, :]).astype(np.float32, copy=False)
+                    )
+                    try:
+                        vel_lin_w = env.base_env.drone.vel_w[traj_env_id, 0, 0:3]
+                        speed_log.append(float(torch.linalg.norm(vel_lin_w).item()))
+                    except Exception:
+                        speed_log.append(float("nan"))
+                    done_log.append(False)
+                    step_log.append(int(global_step))
+            except Exception:
+                pass
         last_action = None
         with set_exploration_type(ExplorationType.MODE):
             for t in range(max_steps):
@@ -237,8 +282,33 @@ def evaluate_model(env, policy, num_episodes, cfg):
                 except Exception:
                     last_action = None
                 td = env.step(td)["next"]
+                global_step += 1
 
                 done = td.get("done", None)
+                if save_traj:
+                    try:
+                        env.base_env.drone.get_state()
+                        if (global_step % traj_stride) == 0:
+                            pos_log.append(
+                                _to_numpy(env.base_env.drone.pos[traj_env_id, 0, :]).astype(np.float32, copy=False)
+                            )
+                            heading_log.append(
+                                _to_numpy(env.base_env.drone.heading[traj_env_id, 0, :]).astype(np.float32, copy=False)
+                            )
+                            try:
+                                vel_lin_w = env.base_env.drone.vel_w[traj_env_id, 0, 0:3]
+                                speed_log.append(float(torch.linalg.norm(vel_lin_w).item()))
+                            except Exception:
+                                speed_log.append(float("nan"))
+                            done_val = False
+                            if done is not None:
+                                done_mask = done.squeeze(-1)
+                                done_val = bool(done_mask[traj_env_id].item())
+                            done_log.append(done_val)
+                            step_log.append(int(global_step))
+                    except Exception:
+                        pass
+
                 if done is not None and bool(done.any()):
                     done_mask = done.squeeze(-1)
                     try:
@@ -248,10 +318,77 @@ def evaluate_model(env, policy, num_episodes, cfg):
                         pass
                     td.set("_reset", done_mask)
                     td = env.reset(td)
+                    if save_traj:
+                        try:
+                            env.base_env.drone.get_state()
+                            if (global_step % traj_stride) == 0:
+                                pos_log.append(
+                                    _to_numpy(env.base_env.drone.pos[traj_env_id, 0, :]).astype(np.float32, copy=False)
+                                )
+                                heading_log.append(
+                                    _to_numpy(env.base_env.drone.heading[traj_env_id, 0, :]).astype(np.float32, copy=False)
+                                )
+                                try:
+                                    vel_lin_w = env.base_env.drone.vel_w[traj_env_id, 0, 0:3]
+                                    speed_log.append(float(torch.linalg.norm(vel_lin_w).item()))
+                                except Exception:
+                                    speed_log.append(float("nan"))
+                                done_log.append(False)
+                                step_log.append(int(global_step))
+                        except Exception:
+                            pass
         if episode_stats:
             stats_td = torch.stack(episode_stats).to_tensordict()
             results.append(stats_td)
-    return results
+
+    saved_path = None
+    if save_traj and pos_log:
+        try:
+            pos_arr = np.stack(pos_log, axis=0).astype(np.float32, copy=False)
+            heading_arr = np.stack(heading_log, axis=0).astype(np.float32, copy=False)
+            speed_arr = np.asarray(speed_log, dtype=np.float32)
+            done_arr = np.asarray(done_log, dtype=np.bool_)
+            step_arr = np.asarray(step_log, dtype=np.int64)
+
+            base_env = getattr(env, "base_env", None)
+            center = _to_numpy(getattr(base_env, "cylinder_center", np.zeros((1, 1, 3), dtype=np.float32)))
+            center = np.asarray(center, dtype=np.float32).reshape(-1)[:3]
+
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = traj_path.with_name(traj_path.stem + "_tmp" + traj_path.suffix)
+            np.savez_compressed(
+                tmp_path,
+                step=step_arr,
+                pos=pos_arr,
+                heading=heading_arr,
+                speed=speed_arr,
+                done=done_arr,
+                cylinder_center=center,
+                cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
+                cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),
+                orbit_radius=float(getattr(base_env, "orbit_radius", 0.0)),
+                orbit_z=float(getattr(base_env, "orbit_z", 0.0)),
+                meta=np.array(
+                    [
+                        {
+                            "task": str(getattr(cfg, "task", {}).get("name", "")) if hasattr(cfg, "task") else "",
+                            "algo": str(getattr(cfg, "algo", {}).get("name", "")) if hasattr(cfg, "algo") else "",
+                            "ckpt": str(eval_cfg.get("ckpt", "")),
+                            "dt": float(getattr(getattr(cfg, "sim", None), "dt", 0.0)),
+                            "traj_env_id": int(traj_env_id),
+                            "traj_stride": int(traj_stride),
+                        }
+                    ],
+                    dtype=object,
+                ),
+            )
+            tmp_path.replace(traj_path)
+            saved_path = traj_path
+            print(f"[eval] saved trajectory: {traj_path.resolve()}")
+        except Exception as exc:
+            print(f"[eval] failed to save trajectory: {exc}")
+
+    return results, saved_path
 
 FILE_PATH = os.path.dirname(__file__)
 @hydra.main(config_path=FILE_PATH, config_name="train")
@@ -267,8 +404,28 @@ def main(cfg):
     from marinegym.envs import register_tasks
     register_tasks()
     policy, env = load_checkpoint(cfg.eval.ckpt, cfg, cfg.algo)
-    eval_results = evaluate_model(env, policy, num_episodes=100, cfg=cfg)
+    eval_cfg = cfg.get("eval", {}) if hasattr(cfg, "get") else getattr(cfg, "eval", {})
+    num_episodes = int(eval_cfg.get("episodes", 1))
+    eval_results, traj_path = evaluate_model(env, policy, num_episodes=num_episodes, cfg=cfg)
     print(eval_results)
+    if traj_path is not None and bool(eval_cfg.get("plot_traj", True)):
+        try:
+            from visualize_trajectory import plot_trajectory_3d
+
+            out_png = eval_cfg.get("traj_png_path", None)
+            out_path = Path(out_png).expanduser() if out_png else traj_path.with_suffix(".png")
+            if not out_path.is_absolute():
+                out_path = Path.cwd() / out_path
+            plot_trajectory_3d(
+                traj_path=traj_path,
+                out_path=out_path,
+                heading_stride=int(eval_cfg.get("plot_heading_stride", 50)),
+                arrow_len=float(eval_cfg.get("plot_arrow_len", 0.25)),
+                show=bool(eval_cfg.get("plot_show", False)),
+            )
+            print(f"[eval] saved trajectory plot: {out_path.resolve()}")
+        except Exception as exc:
+            print(f"[eval] failed to plot trajectory: {exc}")
 
 if __name__ == "__main__":
     main()

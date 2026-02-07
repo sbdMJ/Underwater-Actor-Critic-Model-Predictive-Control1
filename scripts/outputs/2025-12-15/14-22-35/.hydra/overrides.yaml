@@ -1,8 +1,0 @@
-- task=Hover
-- algo=ppo
-- algo.use_mpc_head=true
-- algo.mpc_dt=${sim.dt}
-- algo.mpc_nu=-1
-- algo.mpc_param_yaml=/home/mjkim/.../BlueROV.yaml
-- headless=false
-- enable_livestream=true

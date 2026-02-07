@@ -132,13 +132,19 @@ def main(cfg):
       python scripts/test_mpc_withCam.py task=Hover_MPC headless=false enable_livestream=false env.num_envs=1
       python scripts/test_mpc_withCam.py task=Hover_MPC camera.capture_interval=60
 
-      ~/isaac410/python.sh scripts/test_mpc_withCam.py   task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1   task.use_pypose_mpc=false   +camera.head_offset='[0.4,0,0.15]'
+      ~/isaac410/python.sh scripts/test_mpc_withCam.py   task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1   task.use_pypose_mpc=false   +camera.head_offset='[0.4,0,0.15]' env.max_episode_length=800
 
       # 1바퀴(2π)마다 orbit_z를 조금씩 내려가며 여러 바퀴(나선형) 돌기
       ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 +layered_orbit.enable=true +layered_orbit.delta_z=0.05 +layered_orbit.laps=5 +layered_orbit.transition_steps=60
 
       # 1바퀴 도는거 diffMPC (pypose)
       ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 task.use_pypose_mpc=true +camera.head_offset='[0.4,0,0.15]' task.pypose_orbit_mode=cylinder_cost
+
+    Trajectory logging (default on):
+      - Saves `trajectory.npz` and `trajectory.png` under Hydra's run dir (./outputs/...). (speed is shown as colormap if available)
+      - Disable with `+traj_log.enable=false`.
+      - Override paths with `+traj_log.traj_path=/tmp/trajectory.npz +traj_log.traj_png_path=/tmp/trajectory.png`.
+      - Re-visualize later: `python scripts/visualize_trajectory.py /path/to/trajectory.npz`
 
     """
     OmegaConf.register_new_resolver("eval", eval)
@@ -232,6 +238,56 @@ def main(cfg):
         print("[test_mpc] target_pos[0]:", env.base_env.target_pos[0, 0].detach().cpu().tolist())
     except Exception:
         pass
+
+    traj_cfg = cfg.get("traj_log", None)
+    if traj_cfg is None:
+        traj_cfg = {}
+    traj_cfg = OmegaConf.to_container(traj_cfg, resolve=True) if not isinstance(traj_cfg, dict) else traj_cfg
+    traj_enable = bool(traj_cfg.get("enable", True))
+    traj_env_id = int(traj_cfg.get("env_id", traj_cfg.get("traj_env_id", 0)))
+    traj_stride = max(1, int(traj_cfg.get("stride", traj_cfg.get("traj_stride", 1))))
+    traj_out = traj_cfg.get("path", traj_cfg.get("traj_path", None))
+    traj_path = Path(str(traj_out)).expanduser() if traj_out else Path.cwd() / "trajectory.npz"
+    if not traj_path.is_absolute():
+        traj_path = Path.cwd() / traj_path
+    traj_plot = bool(traj_cfg.get("plot", traj_cfg.get("plot_traj", True)))
+    traj_png_out = traj_cfg.get("png_path", traj_cfg.get("traj_png_path", None))
+    traj_png_path = Path(str(traj_png_out)).expanduser() if traj_png_out else traj_path.with_suffix(".png")
+    if not traj_png_path.is_absolute():
+        traj_png_path = Path.cwd() / traj_png_path
+    traj_plot_heading_stride = int(traj_cfg.get("plot_heading_stride", 50))
+    traj_plot_arrow_len = float(traj_cfg.get("plot_arrow_len", 0.25))
+    traj_plot_show = bool(traj_cfg.get("plot_show", False))
+
+    traj_pos_log = []
+    traj_heading_log = []
+    traj_speed_log = []
+    traj_done_log = []
+    traj_step_log = []
+
+    def _traj_maybe_append(*, step: int, done: bool) -> None:
+        if not traj_enable:
+            return
+        if (int(step) % int(traj_stride)) != 0:
+            return
+        try:
+            base_env.drone.get_state()
+            pos = _to_numpy(base_env.drone.pos[int(traj_env_id), 0, :]).astype(np.float32, copy=False)
+            heading = _to_numpy(base_env.drone.heading[int(traj_env_id), 0, :]).astype(np.float32, copy=False)
+            try:
+                vel_lin_w = base_env.drone.vel_w[int(traj_env_id), 0, 0:3]
+                speed = float(torch.linalg.norm(vel_lin_w).item())
+            except Exception:
+                speed = float("nan")
+            traj_pos_log.append(pos)
+            traj_heading_log.append(heading)
+            traj_speed_log.append(speed)
+            traj_done_log.append(bool(done))
+            traj_step_log.append(int(step))
+        except Exception:
+            return
+
+    _traj_maybe_append(step=0, done=False)
 
     if camera is not None and bool(camera_cfg.get("capture_on_reset", True)):
         base_env.sim.render()
@@ -531,6 +587,21 @@ def main(cfg):
             td_next = td_out["next"]
             td = td_next
 
+            done = td.get("done", None)
+            done_mask_for_traj = None
+            if done is not None:
+                try:
+                    done_mask_for_traj = done.squeeze(-1)
+                except Exception:
+                    done_mask_for_traj = None
+            done_val_for_traj = False
+            if done_mask_for_traj is not None:
+                try:
+                    done_val_for_traj = bool(done_mask_for_traj[int(traj_env_id)].item())
+                except Exception:
+                    done_val_for_traj = False
+            _traj_maybe_append(step=int(step_idx) + 1, done=done_val_for_traj)
+
             if exp_log_enable and exp_log_buffers is not None and ep_id is not None and ep_len is not None:
                 n_envs = int(ep_id.numel())
 
@@ -656,11 +727,11 @@ def main(cfg):
                     except Exception:
                         pass
 
-            done = td.get("done", None)
             if done is not None and bool(done.any()):
                 reset_mask = done.squeeze(-1)
                 td.set("_reset", reset_mask)
                 td = env.reset(td)
+                _traj_maybe_append(step=int(step_idx) + 1, done=False)
                 try:
                     print("[test_mpc] target_pos[0]:", env.base_env.target_pos[0, 0].detach().cpu().tolist())
                 except Exception:
@@ -704,6 +775,61 @@ def main(cfg):
                         print(f"[test_mpc_withCam] layered_orbit done: laps={layered_orbit_laps}")
                         break
     finally:
+        if traj_enable and traj_pos_log:
+            try:
+                pos_arr = np.stack(traj_pos_log, axis=0).astype(np.float32, copy=False)
+                heading_arr = np.stack(traj_heading_log, axis=0).astype(np.float32, copy=False)
+                speed_arr = np.asarray(traj_speed_log, dtype=np.float32)
+                done_arr = np.asarray(traj_done_log, dtype=np.bool_)
+                step_arr = np.asarray(traj_step_log, dtype=np.int64)
+
+                center = _to_numpy(getattr(base_env, "cylinder_center", np.zeros((1, 1, 3), dtype=np.float32)))
+                center = np.asarray(center, dtype=np.float32).reshape(-1)[:3]
+
+                traj_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = traj_path.with_name(traj_path.stem + "_tmp" + traj_path.suffix)
+                np.savez_compressed(
+                    tmp_path,
+                    step=step_arr,
+                    pos=pos_arr,
+                    heading=heading_arr,
+                    speed=speed_arr,
+                    done=done_arr,
+                    cylinder_center=center,
+                    cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
+                    cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),
+                    orbit_radius=float(getattr(base_env, "orbit_radius", 0.0)),
+                    orbit_z=float(getattr(base_env, "orbit_z", 0.0)),
+                    meta=np.array(
+                        [
+                            {
+                                "seed": int(seed),
+                                "dt": float(getattr(getattr(cfg, "sim", None), "dt", 0.0)),
+                                "traj_env_id": int(traj_env_id),
+                                "traj_stride": int(traj_stride),
+                                "steps": int(steps),
+                            }
+                        ],
+                        dtype=object,
+                    ),
+                )
+                _atomic_replace(tmp_path, traj_path)
+                print(f"[test_mpc_withCam] saved trajectory: {traj_path.resolve()}")
+
+                if traj_plot:
+                    from visualize_trajectory import plot_trajectory_3d
+
+                    plot_trajectory_3d(
+                        traj_path=traj_path,
+                        out_path=traj_png_path,
+                        heading_stride=int(traj_plot_heading_stride),
+                        arrow_len=float(traj_plot_arrow_len),
+                        show=bool(traj_plot_show),
+                    )
+                    print(f"[test_mpc_withCam] saved trajectory plot: {traj_png_path.resolve()}")
+            except Exception as e:
+                print(f"[test_mpc_withCam] failed to save trajectory: {e}")
+
         if exp_log_enable and exp_log_out_dir is not None and exp_log_buffers is not None:
             try:
                 _save_exp_buffers(do_plot=bool(exp_log_cfg.get("plot", True)))

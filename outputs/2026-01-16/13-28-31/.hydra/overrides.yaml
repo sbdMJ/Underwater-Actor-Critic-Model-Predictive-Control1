@@ -1,6 +1,0 @@
-- +eval.run_dir=/home/mjkim/MarineGym/wandb/offline-run-20260115_122704-jdm5wjw1/
-- task=Hover_MPC
-- algo=ac_mpc_pypose
-- headless=false
-- enable_livestream=false
-- env.num_envs=1
