@@ -20,6 +20,10 @@ max_iters: -1
 eval_interval: -1
 save_interval: -1
 seed: 0
+resume_ckpt: null
+resume_frames: null
+resume_iter: null
+save_resume_state: true
 
 # scripts/test_pypose_mpc.py overrides (Hydra strict mode friendly)
 mpc_test_steps: 5000

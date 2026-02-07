@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -433,6 +434,96 @@ def main(cfg):
     except KeyError:
         raise NotImplementedError(f"Unknown algorithm: {cfg.algo.name}")
 
+    def _policy_state_dict() -> dict:
+        state_dict = policy.state_dict()
+        if not is_distributed:
+            return state_dict
+        stripped = {}
+        for k, v in state_dict.items():
+            if k.startswith("actor.module."):
+                k = "actor." + k[len("actor.module.") :]
+            elif k.startswith("critic.module."):
+                k = "critic." + k[len("critic.module.") :]
+            stripped[k] = v
+        return stripped
+
+    def _optimizer_state_dict() -> dict:
+        optim_state = {}
+        for name, value in vars(policy).items():
+            if isinstance(value, torch.optim.Optimizer):
+                optim_state[name] = value.state_dict()
+        return optim_state
+
+    def _maybe_load_optimizer_state(optim_state: dict):
+        if not isinstance(optim_state, dict):
+            return
+        for name, state in optim_state.items():
+            opt = getattr(policy, name, None)
+            if isinstance(opt, torch.optim.Optimizer):
+                try:
+                    opt.load_state_dict(state)
+                except Exception:
+                    pass
+
+    def _unwrap_policy_state(ckpt: dict) -> dict:
+        if not isinstance(ckpt, dict):
+            raise TypeError(f"Checkpoint is not a dict. type={type(ckpt)}")
+        for key in ("policy", "policy_state_dict", "state_dict", "model", "net"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                return ckpt[key]
+        if ckpt and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+            return ckpt
+        raise TypeError("Checkpoint does not contain a policy state_dict.")
+
+    def _load_resume_checkpoint(ckpt_path: Path):
+        payload = torch.load(str(ckpt_path), map_location=base_env.device)
+        policy_state = None
+        optim_state = None
+        collector_state = None
+        if isinstance(payload, dict):
+            try:
+                policy_state = _unwrap_policy_state(payload)
+            except TypeError:
+                policy_state = None
+            optim_state = payload.get("optimizers", None)
+            collector_state = payload.get("collector", None)
+
+        if optim_state is None or collector_state is None:
+            if ckpt_path.suffix == ".pt":
+                resume_path = ckpt_path.with_suffix(".resume.pt")
+                if resume_path.exists():
+                    resume_payload = torch.load(str(resume_path), map_location=base_env.device)
+                    if isinstance(resume_payload, dict):
+                        try:
+                            policy_state = _unwrap_policy_state(resume_payload) or policy_state
+                        except TypeError:
+                            pass
+                        optim_state = resume_payload.get("optimizers", optim_state)
+                        collector_state = resume_payload.get("collector", collector_state)
+
+        if policy_state is None:
+            raise TypeError("Checkpoint is missing a policy state_dict.")
+
+        return policy_state, optim_state, collector_state
+
+    resume_frames = int(cfg.get("resume_frames", 0) or 0)
+    resume_iter = int(cfg.get("resume_iter", -1) or -1)
+    resume_ckpt = cfg.get("resume_ckpt", None)
+    if resume_ckpt:
+        resume_path = Path(str(resume_ckpt)).expanduser()
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        policy_state, optim_state, collector_state = _load_resume_checkpoint(resume_path)
+        policy.load_state_dict(policy_state, strict=False)
+        _maybe_load_optimizer_state(optim_state or {})
+        if isinstance(collector_state, dict):
+            resume_frames = int(collector_state.get("frames", resume_frames))
+            resume_iter = int(collector_state.get("iter", resume_iter))
+        if resume_frames <= 0:
+            match = re.search(r"checkpoint_(\d+)\.pt$", str(resume_path))
+            if match:
+                resume_frames = int(match.group(1))
+
     if is_distributed:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -467,6 +558,9 @@ def main(cfg):
     # Default: every 10% of training (override with `save_every_percent`; set <=0 to disable).
     save_every_percent = float(cfg.get("save_every_percent", 0.1))
 
+    if resume_iter < 0 and resume_frames > 0:
+        resume_iter = max(resume_frames // frames_per_batch - 1, -1)
+
     stats_keys = [
         k for k in base_env.observation_spec.keys(True, True)
         if isinstance(k, tuple) and k[0]=="stats"
@@ -480,23 +574,27 @@ def main(cfg):
         device=cfg.sim.device,
         return_same_td=True,
     )
+    if resume_frames > 0:
+        collector._initial_frames = resume_frames
+    if resume_iter >= 0:
+        collector._initial_iter = resume_iter
 
     stop_file = cfg.get("stop_file", None)
     if stop_file is None:
         stop_file = str(Path(run.dir) / "STOP")
 
-    def _state_dict_for_checkpoint() -> dict:
-        state_dict = policy.state_dict()
-        if not is_distributed:
-            return state_dict
-        stripped = {}
-        for k, v in state_dict.items():
-            if k.startswith("actor.module."):
-                k = "actor." + k[len("actor.module.") :]
-            elif k.startswith("critic.module."):
-                k = "critic." + k[len("critic.module.") :]
-            stripped[k] = v
-        return stripped
+    def _resume_state_for_checkpoint(step_iter: int, step_frames: int) -> dict:
+        return {
+            "policy": _policy_state_dict(),
+            "optimizers": _optimizer_state_dict(),
+            "collector": {
+                "frames": int(step_frames),
+                "iter": int(step_iter),
+            },
+            "meta": {
+                "time": time.time(),
+            },
+        }
 
     @torch.no_grad()
     def evaluate(
@@ -561,7 +659,7 @@ def main(cfg):
         ckpt_dir = Path(run.dir) / "checkpoints"
         if is_rank0:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
-        last_ckpt_frames = -1
+        last_ckpt_frames = resume_frames if resume_frames > 0 else -1
         next_ckpt_target_frames = None
         next_ckpt_target_iter = None
 
@@ -574,6 +672,16 @@ def main(cfg):
                 next_ckpt_target_frames = _align(total_frames * save_every_percent)
             elif max_iters > 0:
                 next_ckpt_target_iter = max(1, int(max_iters * save_every_percent))
+            if resume_frames > 0 and next_ckpt_target_frames is not None:
+                while next_ckpt_target_frames is not None and resume_frames >= next_ckpt_target_frames:
+                    next_ckpt_target_frames = _align(next_ckpt_target_frames + total_frames * save_every_percent)
+                    if total_frames > 0 and next_ckpt_target_frames > total_frames:
+                        next_ckpt_target_frames = None
+            if resume_iter >= 0 and next_ckpt_target_iter is not None and max_iters > 0:
+                while next_ckpt_target_iter is not None and resume_iter >= next_ckpt_target_iter:
+                    next_ckpt_target_iter = int(next_ckpt_target_iter + max_iters * save_every_percent)
+                    if next_ckpt_target_iter >= max_iters:
+                        next_ckpt_target_iter = None
 
         def _maybe_save_checkpoint(force: bool = False):
             nonlocal last_ckpt_frames, next_ckpt_target_frames, next_ckpt_target_iter
@@ -600,7 +708,10 @@ def main(cfg):
                     return
             try:
                 ckpt_path = ckpt_dir / f"checkpoint_{collector._frames}.pt"
-                torch.save(_state_dict_for_checkpoint(), ckpt_path)
+                torch.save(_policy_state_dict(), ckpt_path)
+                if bool(cfg.get("save_resume_state", True)):
+                    resume_path = ckpt_path.with_suffix(".resume.pt")
+                    torch.save(_resume_state_for_checkpoint(i, collector._frames), resume_path)
                 last_ckpt_frames = int(collector._frames)
                 logging.info(f"Saved checkpoint to {str(ckpt_path)}")
 
@@ -622,9 +733,18 @@ def main(cfg):
             except AttributeError:
                 logging.warning(f"Policy {policy} does not implement `.state_dict()`")
 
-        pbar = tqdm(collector, total=total_frames//frames_per_batch, disable=not is_rank0)
+        initial_steps = resume_frames // frames_per_batch if resume_frames > 0 else 0
+        start_iter = resume_iter + 1 if resume_iter >= 0 else 0
+        pbar = tqdm(
+            collector,
+            total=total_frames // frames_per_batch,
+            initial=initial_steps,
+            disable=not is_rank0,
+        )
         env.train()
-        for i, data in enumerate(pbar):
+        last_iter = start_iter - 1
+        for i, data in enumerate(pbar, start=start_iter):
+            last_iter = i
             if os.path.exists(stop_file):
                 logging.info(f"Stop file detected: {stop_file}")
                 break
@@ -719,12 +839,22 @@ def main(cfg):
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = str(Path(run.dir) / "checkpoint_final.pt")
             ckpt_path_copy = str(ckpt_dir / "checkpoint_final.pt")
-            torch.save(_state_dict_for_checkpoint(), ckpt_path)
+            torch.save(_policy_state_dict(), ckpt_path)
             # Convenience copy alongside intermediate checkpoints.
             try:
-                torch.save(_state_dict_for_checkpoint(), ckpt_path_copy)
+                torch.save(_policy_state_dict(), ckpt_path_copy)
             except Exception:
                 pass
+            if bool(cfg.get("save_resume_state", True)):
+                resume_path = str(Path(run.dir) / "checkpoint_final.resume.pt")
+                torch.save(_resume_state_for_checkpoint(last_iter, collector._frames), resume_path)
+                try:
+                    torch.save(
+                        _resume_state_for_checkpoint(last_iter, collector._frames),
+                        str(ckpt_dir / "checkpoint_final.resume.pt"),
+                    )
+                except Exception:
+                    pass
 
             model_artifact = wandb.Artifact(
                 f"{cfg.task.name}-{cfg.algo.name.lower()}-{cfg.task.drone_model.name}",
