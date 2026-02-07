@@ -62,11 +62,11 @@ reward_orbit_theta_scale: 0.0872664626  # 5deg in rad
 reward_orbit_v_tan_ref: 0.5            # m/s (used when mode=vtan/both)
 # Optional heading offset (radians) to account for model forward-axis mismatch.
 # Defaults to task.orbit_yaw_offset when unset.
-reward_orbit_yaw_offset: 0.0
+reward_orbit_yaw_offset: 1.5707963268
 
 # Progress gating (encourage: "look at cylinder while orbiting")
 # - none|mul|threshold
-reward_orbit_progress_gate_mode: mul
+reward_orbit_progress_gate_mode: none
 reward_orbit_gate_heading_power: 2.0
 reward_orbit_gate_radius_power: 1.0
 reward_orbit_gate_heading_min: 0.8
@@ -94,9 +94,9 @@ reward_orbit_v_rad_ref: 0.30
 
 # Termination thresholds / penalties (done + penalty).
 # NOTE: r_min/r_max are absolute radii (meters).
-reward_orbit_r_min: 0.50
-reward_orbit_r_max: 2.00
-reward_orbit_rp_max_deg: 45.0
+reward_orbit_r_min: 0.30
+reward_orbit_r_max: 2.50
+reward_orbit_rp_max_deg: 60.0
 reward_orbit_terminate_penalty: -2.0
 
 # Reward clipping.
