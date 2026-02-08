@@ -47,6 +47,13 @@ class PPOConfig:
     train_every: int = 32
     ppo_epochs: int = 4
     num_minibatches: int = 16
+    entropy_coef: float = 0.005
+    clip_param: float = 0.1
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    actor_log_std_init: float = 0.0
+    actor_log_std_min: float = -2.0
+    actor_log_std_max: float = 1.0
 
     # whether to use privileged information
     priv_actor: bool = False
@@ -70,14 +77,23 @@ def make_mlp(num_units):
 
 
 class Actor(nn.Module):
-    def __init__(self, action_dim: int) -> None:
+    def __init__(
+        self,
+        action_dim: int,
+        log_std_init: float,
+        log_std_min: float,
+        log_std_max: float,
+    ) -> None:
         super().__init__()
         self.actor_mean = nn.LazyLinear(action_dim)
-        self.actor_std = nn.Parameter(torch.zeros(action_dim))
+        self.actor_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
+        self.log_std_min = float(log_std_min)
+        self.log_std_max = float(log_std_max)
 
     def forward(self, features: torch.Tensor):
         loc = self.actor_mean(features)
-        scale = torch.exp(self.actor_std).expand_as(loc)
+        log_std = self.actor_std.clamp(min=self.log_std_min, max=self.log_std_max)
+        scale = torch.exp(log_std).expand_as(loc)
         return loc, scale
 
 
@@ -95,8 +111,8 @@ class PPOPolicy(TensorDictModuleBase):
         self.cfg = cfg
         self.device = device
 
-        self.entropy_coef = 0.001
-        self.clip_param = 0.1
+        self.entropy_coef = float(cfg.entropy_coef)
+        self.clip_param = float(cfg.clip_param)
         self.critic_loss_fn = nn.HuberLoss(delta=10)
         self.n_agents, self.action_dim = action_spec.shape[-2:]
         self.gae = GAE(0.99, 0.95)
@@ -113,13 +129,29 @@ class PPOPolicy(TensorDictModuleBase):
                 ),
                 CatTensors(["feature", "context"], "feature"),
                 TensorDictModule(
-                    nn.Sequential(make_mlp([256, 256]), Actor(self.action_dim)),
+                    nn.Sequential(
+                        make_mlp([256, 256]),
+                        Actor(
+                            self.action_dim,
+                            cfg.actor_log_std_init,
+                            cfg.actor_log_std_min,
+                            cfg.actor_log_std_max,
+                        ),
+                    ),
                     ["feature"], ["loc", "scale"]
                 )
             )
         else:
             actor_module=TensorDictModule(
-                nn.Sequential(make_mlp([256, 256, 256]), Actor(self.action_dim)),
+                nn.Sequential(
+                    make_mlp([256, 256, 256]),
+                    Actor(
+                        self.action_dim,
+                        cfg.actor_log_std_init,
+                        cfg.actor_log_std_min,
+                        cfg.actor_log_std_max,
+                    ),
+                ),
                 [("agents", "observation")], ["loc", "scale"]
             )
         self.actor: ProbabilisticActor = ProbabilisticActor(
@@ -165,8 +197,8 @@ class PPOPolicy(TensorDictModuleBase):
             self.actor.apply(init_)
             self.critic.apply(init_)
 
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(cfg.actor_lr))
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(cfg.critic_lr))
         self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
 
     def __call__(self, tensordict: TensorDict):
