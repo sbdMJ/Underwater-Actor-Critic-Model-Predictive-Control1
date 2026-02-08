@@ -41,12 +41,14 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     priv_critic: bool = False
     checkpoint_path: Optional[str] = None
 
-    entropy_coef: float = 0.001
+    entropy_coef: float = 0.005
     clip_param: float = 0.1
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
 
-    actor_log_std_init: float = -1.0
-    actor_log_std_min: float = -3.0
-    actor_log_std_max: float = 0.5
+    actor_log_std_init: float = 0.0
+    actor_log_std_min: float = -2.0
+    actor_log_std_max: float = 1.0
 
     # Observation layout hints (populated by scripts/train.py).
     obs_has_target_quat: bool = False
@@ -459,8 +461,8 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
             state_dict = torch.load(self.cfg.checkpoint_path)
             self.load_state_dict(state_dict, strict=False)
 
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(cfg.actor_lr))
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(cfg.critic_lr))
         self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
 
     def __call__(self, tensordict: TensorDict):
