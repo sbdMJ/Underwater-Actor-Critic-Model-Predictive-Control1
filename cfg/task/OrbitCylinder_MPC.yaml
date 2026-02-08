@@ -134,7 +134,7 @@ orbit_direction: 1.0  # +1: CCW, -1: CW
 orbit_yaw_offset: 0.0
 hide_target_vis: true
 # desired tangential speed (m/s). If 0, controller uses 2*pi*R/(orbit_period_steps*dt)
-orbit_v_tan: 0.0
+orbit_v_tan: 0.5
 
 # Target (used in Hover-style obs/reward):
 #   - auto: waypoint when use_internal_mpc=false else center

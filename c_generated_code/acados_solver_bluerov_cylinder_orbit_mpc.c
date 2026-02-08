@@ -473,7 +473,7 @@ void bluerov_cylinder_orbit_mpc_acados_setup_nlp_in(bluerov_cylinder_orbit_mpc_s
 
    double* W_0 = calloc(NY0*NY0, sizeof(double));
     // change only the non-zero elements:
-    W_0[0+(NY0) * 0] = 200;
+    W_0[0+(NY0) * 0] = 100;
     W_0[1+(NY0) * 1] = 100;
     W_0[2+(NY0) * 2] = 5;
     W_0[3+(NY0) * 3] = 80;
@@ -501,7 +501,7 @@ void bluerov_cylinder_orbit_mpc_acados_setup_nlp_in(bluerov_cylinder_orbit_mpc_s
     free(yref);
     double* W = calloc(NY*NY, sizeof(double));
     // change only the non-zero elements:
-    W[0+(NY) * 0] = 200;
+    W[0+(NY) * 0] = 100;
     W[1+(NY) * 1] = 100;
     W[2+(NY) * 2] = 5;
     W[3+(NY) * 3] = 80;
@@ -530,7 +530,7 @@ void bluerov_cylinder_orbit_mpc_acados_setup_nlp_in(bluerov_cylinder_orbit_mpc_s
 
     double* W_e = calloc(NYN*NYN, sizeof(double));
     // change only the non-zero elements:
-    W_e[0+(NYN) * 0] = 200;
+    W_e[0+(NYN) * 0] = 100;
     W_e[1+(NYN) * 1] = 100;
     W_e[2+(NYN) * 2] = 5;
     W_e[3+(NYN) * 3] = 80;
