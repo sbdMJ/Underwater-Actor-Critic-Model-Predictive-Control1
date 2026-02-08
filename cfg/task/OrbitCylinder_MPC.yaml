@@ -73,7 +73,7 @@ reward_orbit_w_backwards: 0.5
 reward_orbit_w_att: 0.25
 
 # Sparse lap bonus: +bonus each time the vehicle completes a full 2*pi orbit (in desired direction).
-reward_orbit_lap_bonus: 1.0
+reward_orbit_lap_bonus: 0.0
 
 # Penalty weights.
 reward_orbit_w_u: 0.05
@@ -86,13 +86,13 @@ reward_orbit_v_rad_ref: 0.30
 # Termination thresholds / penalties (done + penalty).
 # NOTE: r_min/r_max are absolute radii (meters).
 reward_orbit_r_min: 0.50
-reward_orbit_r_max: 2.00
-reward_orbit_rp_max_deg: 45.0
-reward_orbit_terminate_penalty: -2.0
+reward_orbit_r_max: 2.50
+reward_orbit_rp_max_deg: 60.0
+reward_orbit_terminate_penalty: -0.5
 
 # Reward clipping.
-reward_orbit_clip_min: -5.0
-reward_orbit_clip_max: 5.0
+reward_orbit_clip_min: -2.0
+reward_orbit_clip_max: 2.0
 
 # Optional: stationary penalty (discourage staying at the same XY position too long).
 # - delta_xy < xy_eps is considered "still"
@@ -186,7 +186,7 @@ init_rpy_max: [0.0, 0.0, 0.0]
 spawn_fixed: true
 
 # MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
-terminate_distance: 7.0 #2.3
+terminate_distance: 10.0 #2.3
 terminate_min_z: 0.1
 
 # Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
