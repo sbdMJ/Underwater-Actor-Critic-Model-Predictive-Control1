@@ -33,20 +33,20 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     """
 
     name: str = "ppo_pypose_cylinder_mpc_werr_wu_tv"
-    train_every: int = 32
-    ppo_epochs: int = 2
+    train_every: int = 64
+    ppo_epochs: int = 5
     num_minibatches: int = 8
 
     priv_actor: bool = False
     priv_critic: bool = False
     checkpoint_path: Optional[str] = None
 
-    entropy_coef: float = 0.001
+    entropy_coef: float = 0.0001
     clip_param: float = 0.1
 
     actor_log_std_init: float = -1.0
     actor_log_std_min: float = -3.0
-    actor_log_std_max: float = 0.5
+    actor_log_std_max: float = 0.0
 
     # Observation layout hints (populated by scripts/train.py).
     obs_has_target_quat: bool = False
@@ -85,10 +85,10 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     werr_lb: float = 1e-3
     werr_ub: float = 1e3
     wu_lb: float = 1e-3
-    wu_ub: float = 1.0
+    wu_ub: float = 0.2
     weights_log_scale: bool = True
     cost_hidden: int = 256
-    R_min_coeff: float = 0.5
+    R_min_coeff: float = 0.2
     gamma_d_max: float = 5.0
 
     critic_worstcase_k: int = 1
