@@ -94,10 +94,10 @@ reward_orbit_v_rad_ref: 0.30
 
 # Termination thresholds / penalties (done + penalty).
 # NOTE: r_min/r_max are absolute radii (meters).
-reward_orbit_r_min: 0.50
-reward_orbit_r_max: 2.00
-reward_orbit_rp_max_deg: 45.0
-reward_orbit_terminate_penalty: -2.0
+reward_orbit_r_min: 0.40
+reward_orbit_r_max: 2.50
+reward_orbit_rp_max_deg: 60.0
+reward_orbit_terminate_penalty: -1.0
 
 # Reward clipping.
 reward_orbit_clip_min: -5.0
@@ -163,8 +163,8 @@ init_rpy_max: [0.0, 0.0, 0.0]
 spawn_fixed: true
 
 # MPC 디버깅용: 너무 빨리 terminate 되는 경우 완화
-terminate_distance: 7.0 #2.3
-terminate_min_z: 0.1
+terminate_distance: 8.0 #2.3
+terminate_min_z: 0.05
 
 # Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
 terminate_stationary_enable: false

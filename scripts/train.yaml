@@ -64,6 +64,10 @@ exp_log:
 wandb:
   group: ${oc.select:..task.name}
   run_name: ${oc.select:..task.name,test}-${oc.select:..algo.name,none}-${oc.select:..task.drone_model.name,none}
+  run_prefix: ""
+  # Optional: restrict which Hydra override keys appear in the run name.
+  # Example: [task.reward_orbit_r_max, task.reward_orbit_rp_max_deg]
+  name_keys: null
   job_type: train
   # Set to your W&B username/team (or override with `wandb.entity=...`).
   # If null, wandb uses your default entity from `wandb login`/`WANDB_ENTITY`.
