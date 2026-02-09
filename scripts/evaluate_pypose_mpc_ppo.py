@@ -22,6 +22,16 @@ FILE_PATH = os.path.dirname(__file__)
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
 
 
+def _get_launch_cwd() -> Path:
+    """Return the directory where the Hydra job was launched from (not the run dir)."""
+    try:
+        from hydra.utils import get_original_cwd  # noqa: WPS433
+
+        return Path(get_original_cwd())
+    except Exception:
+        return Path.cwd()
+
+
 def _to_numpy(x):
     if x is None:
         return None
@@ -329,12 +339,12 @@ def main(cfg):
     traj_out = eval_cfg.get("traj_path", None)
     traj_path = Path(str(traj_out)).expanduser() if traj_out else Path("trajectory.npz")
     if not traj_path.is_absolute():
-        traj_path = Path.cwd() / traj_path
+        traj_path = _get_launch_cwd() / traj_path
 
     traj_png_out = eval_cfg.get("traj_png_path", None)
     traj_png_path = Path(str(traj_png_out)).expanduser() if traj_png_out else traj_path.with_suffix(".png")
     if not traj_png_path.is_absolute():
-        traj_png_path = Path.cwd() / traj_png_path
+        traj_png_path = _get_launch_cwd() / traj_png_path
     plot_energy = bool(eval_cfg.get("plot_energy", eval_cfg.get("plot_traj_energy", True)))
     traj_energy_png_out = eval_cfg.get("traj_energy_png_path", None)
     traj_energy_png_path = (
@@ -343,7 +353,7 @@ def main(cfg):
         else traj_png_path.with_name(traj_png_path.stem + "_energy" + traj_png_path.suffix)
     )
     if not traj_energy_png_path.is_absolute():
-        traj_energy_png_path = Path.cwd() / traj_energy_png_path
+        traj_energy_png_path = _get_launch_cwd() / traj_energy_png_path
     plot_energy_polar = bool(eval_cfg.get("plot_energy_polar", eval_cfg.get("plot_polar_energy", True)))
     traj_energy_polar_png_out = eval_cfg.get("traj_energy_polar_png_path", None)
     traj_energy_polar_png_path = (
@@ -352,7 +362,7 @@ def main(cfg):
         else traj_png_path.with_name(traj_png_path.stem + "_energy_polar" + traj_png_path.suffix)
     )
     if not traj_energy_polar_png_path.is_absolute():
-        traj_energy_polar_png_path = Path.cwd() / traj_energy_polar_png_path
+        traj_energy_polar_png_path = _get_launch_cwd() / traj_energy_polar_png_path
     energy_polar_bin_deg = float(eval_cfg.get("energy_polar_bin_deg", 5.0))
     energy_polar_show_raw = bool(eval_cfg.get("energy_polar_show_raw", False))
     plot_traj = bool(eval_cfg.get("plot_traj", True))

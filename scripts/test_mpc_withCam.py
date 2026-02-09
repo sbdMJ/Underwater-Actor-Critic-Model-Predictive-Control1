@@ -19,6 +19,16 @@ FILE_PATH = str(Path(__file__).resolve().parent)
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
 
 
+def _get_launch_cwd() -> Path:
+    """Return the directory where the Hydra job was launched from (not the run dir)."""
+    try:
+        from hydra.utils import get_original_cwd  # noqa: WPS433
+
+        return Path(get_original_cwd())
+    except Exception:
+        return Path.cwd()
+
+
 @dataclass
 class _EpisodeEnd:
     episode_id: int
@@ -252,14 +262,14 @@ def main(cfg):
     traj_env_id = int(traj_cfg.get("env_id", traj_cfg.get("traj_env_id", 0)))
     traj_stride = max(1, int(traj_cfg.get("stride", traj_cfg.get("traj_stride", 1))))
     traj_out = traj_cfg.get("path", traj_cfg.get("traj_path", None))
-    traj_path = Path(str(traj_out)).expanduser() if traj_out else Path.cwd() / "trajectory.npz"
+    traj_path = Path(str(traj_out)).expanduser() if traj_out else Path("trajectory.npz")
     if not traj_path.is_absolute():
-        traj_path = Path.cwd() / traj_path
+        traj_path = _get_launch_cwd() / traj_path
     traj_plot = bool(traj_cfg.get("plot", traj_cfg.get("plot_traj", True)))
     traj_png_out = traj_cfg.get("png_path", traj_cfg.get("traj_png_path", None))
     traj_png_path = Path(str(traj_png_out)).expanduser() if traj_png_out else traj_path.with_suffix(".png")
     if not traj_png_path.is_absolute():
-        traj_png_path = Path.cwd() / traj_png_path
+        traj_png_path = _get_launch_cwd() / traj_png_path
     traj_plot_energy = bool(traj_cfg.get("plot_energy", True))
     traj_energy_png_out = traj_cfg.get("energy_png_path", traj_cfg.get("traj_energy_png_path", None))
     traj_energy_png_path = (
@@ -268,7 +278,7 @@ def main(cfg):
         else traj_png_path.with_name(traj_png_path.stem + "_energy" + traj_png_path.suffix)
     )
     if not traj_energy_png_path.is_absolute():
-        traj_energy_png_path = Path.cwd() / traj_energy_png_path
+        traj_energy_png_path = _get_launch_cwd() / traj_energy_png_path
     traj_plot_energy_polar = bool(traj_cfg.get("plot_energy_polar", traj_cfg.get("plot_polar_energy", True)))
     traj_energy_polar_png_out = traj_cfg.get("energy_polar_png_path", traj_cfg.get("traj_energy_polar_png_path", None))
     traj_energy_polar_png_path = (
@@ -277,7 +287,7 @@ def main(cfg):
         else traj_png_path.with_name(traj_png_path.stem + "_energy_polar" + traj_png_path.suffix)
     )
     if not traj_energy_polar_png_path.is_absolute():
-        traj_energy_polar_png_path = Path.cwd() / traj_energy_polar_png_path
+        traj_energy_polar_png_path = _get_launch_cwd() / traj_energy_polar_png_path
     traj_energy_polar_bin_deg = float(traj_cfg.get("energy_polar_bin_deg", 5.0))
     traj_energy_polar_show_raw = bool(traj_cfg.get("energy_polar_show_raw", False))
     traj_plot_heading_stride = int(traj_cfg.get("plot_heading_stride", 50))

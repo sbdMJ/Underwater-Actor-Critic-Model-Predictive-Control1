@@ -50,6 +50,16 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
+def _get_launch_cwd() -> Path:
+    """Return the directory where the Hydra job was launched from (not the run dir)."""
+    try:
+        from hydra.utils import get_original_cwd  # noqa: WPS433
+
+        return Path(get_original_cwd())
+    except Exception:
+        return Path.cwd()
+
+
 def load_checkpoint(checkpoint_path, env_config, algo_config):
     from marinegym.envs.isaac_env import IsaacEnv
     env_class = IsaacEnv.REGISTRY[env_config.task.name]
@@ -227,7 +237,7 @@ def evaluate_model(env, policy, num_episodes, cfg):
     traj_out = eval_cfg.get("traj_path", None)
     traj_path = Path(traj_out).expanduser() if traj_out else Path("trajectory.npz")
     if not traj_path.is_absolute():
-        traj_path = Path.cwd() / traj_path
+        traj_path = _get_launch_cwd() / traj_path
 
     pos_log = []
     heading_log = []
@@ -555,7 +565,7 @@ def main(cfg):
             out_png = eval_cfg.get("traj_png_path", None)
             out_path = Path(out_png).expanduser() if out_png else traj_path.with_suffix(".png")
             if not out_path.is_absolute():
-                out_path = Path.cwd() / out_path
+                out_path = _get_launch_cwd() / out_path
             traj_color_key = str(eval_cfg.get("traj_color_key", eval_cfg.get("traj_color", ""))).strip()
             if not traj_color_key:
                 traj_color_key = "v_tan_err"
@@ -579,7 +589,7 @@ def main(cfg):
                     else out_path.with_name(out_path.stem + "_energy" + out_path.suffix)
                 )
                 if not energy_path.is_absolute():
-                    energy_path = Path.cwd() / energy_path
+                    energy_path = _get_launch_cwd() / energy_path
                 plot_trajectory_3d(
                     traj_path=traj_path,
                     out_path=energy_path,
@@ -600,7 +610,7 @@ def main(cfg):
                     else out_path.with_name(out_path.stem + "_energy_polar" + out_path.suffix)
                 )
                 if not energy_polar_path.is_absolute():
-                    energy_polar_path = Path.cwd() / energy_polar_path
+                    energy_polar_path = _get_launch_cwd() / energy_polar_path
                 plot_power_polar(
                     traj_path=traj_path,
                     out_path=energy_polar_path,
