@@ -334,7 +334,7 @@ def main(cfg):
             orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
             if orbit_target_mode in ("auto", ""):
                 reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
-                if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+                if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
                     orbit_target_mode = "center"
                 else:
                     orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
@@ -344,7 +344,15 @@ def main(cfg):
                 center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
                 cfg.algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
 
-            cfg.algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            if orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
+                logging.warning(
+                    "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
+                    "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."
+                )
+                include_cylinder_rel = True
+                cfg.task.include_cylinder_rel_in_obs = True
+            cfg.algo.obs_has_cylinder_rel = include_cylinder_rel
 
             if not cfg.algo.get("werr_init", None):
                 q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
