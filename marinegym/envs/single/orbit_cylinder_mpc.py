@@ -1,3 +1,4 @@
+import math
 import torch
 
 import omni.isaac.core.utils.prims as prim_utils
@@ -41,6 +42,17 @@ class OrbitCylinderMPC(HoverMPC):
             cfg.task.use_internal_mpc = control_mode == "mpc"
 
         super().__init__(cfg, headless)
+
+        flow_cfg = self.disturbances[self.mode]["flow"] if hasattr(self, "disturbances") else {}
+        self.flow_update_mode = str(flow_cfg.get("update_mode", "reset")).strip().lower()
+        self.flow_init_mode = str(flow_cfg.get("init_mode", "uniform")).strip().lower()
+        self.flow_hybrid_prob = float(flow_cfg.get("hybrid_prob", 0.5))
+        self.flow_tau = float(flow_cfg.get("tau", 0.0))
+        self.flow_sigma = flow_cfg.get("sigma", getattr(self, "flow_velocity_gaussian_noise", 0.0))
+        if getattr(self, "enable_flow", False):
+            self._flow_sigma_tensor = torch.tensor(self.flow_sigma, device=self.device, dtype=torch.float32)
+            self._flow_max_tensor = torch.tensor(self.max_flow_velocity, device=self.device, dtype=torch.float32)
+            self._flow_hybrid_ou_mask = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
 
         self.current_vel = torch.zeros(self.num_envs, 3, device=self.device)
         current_cfg = self.cfg.env.get("current", {})
@@ -288,6 +300,21 @@ class OrbitCylinderMPC(HoverMPC):
 
     def _reset_idx(self, env_ids: torch.Tensor):
         super()._reset_idx(env_ids)
+        if getattr(self, "enable_flow", False):
+            num = int(env_ids.numel())
+            flow = self.drone.flow_vels[env_ids, 0, :].clone()
+            max_flow = self._flow_max_tensor.to(device=flow.device, dtype=flow.dtype)
+            if self.flow_init_mode in ("uniform_signed", "signed"):
+                flow = torch.empty((num, 6), device=flow.device, dtype=flow.dtype).uniform_(-1.0, 1.0)
+                flow = flow * max_flow
+            elif self.flow_init_mode in ("zero", "zeros"):
+                flow = torch.zeros((num, 6), device=flow.device, dtype=flow.dtype)
+            else:
+                flow = torch.rand((num, 6), device=flow.device, dtype=flow.dtype) * max_flow
+            self.drone.flow_vels[env_ids, 0, :] = flow
+            if self.flow_update_mode == "hybrid":
+                prob = float(max(0.0, min(1.0, self.flow_hybrid_prob)))
+                self._flow_hybrid_ou_mask[env_ids] = torch.rand((num,), device=self.device) < prob
         if self.current_enable and self.training and self.current_range > 0.0:
             self.current_vel[env_ids] = torch.empty((env_ids.numel(), 3), device=self.device).uniform_(
                 -self.current_range,
@@ -799,7 +826,42 @@ class OrbitCylinderMPC(HoverMPC):
             self.batch_size,
         )
 
+    def _update_flow_disturbance(self):
+        if not getattr(self, "enable_flow", False):
+            return
+        mode = self.flow_update_mode
+        if mode == "hybrid":
+            if not bool(self._flow_hybrid_ou_mask.any()):
+                return
+        elif mode not in ("ou", "ornstein_uhlenbeck"):
+            return
+        tau = float(self.flow_tau)
+        if tau <= 0.0:
+            return
+        dt = float(getattr(self, "dt", 0.0))
+        if dt <= 0.0:
+            return
+        flow = self.drone.flow_vels[:, 0, :]
+        max_flow = self._flow_max_tensor.to(device=flow.device, dtype=flow.dtype)
+        sigma = self._flow_sigma_tensor.to(device=flow.device, dtype=flow.dtype)
+        if mode == "hybrid":
+            mask = self._flow_hybrid_ou_mask
+            if mask.shape[0] != flow.shape[0]:
+                mask = mask[: flow.shape[0]]
+            flow_sel = flow[mask]
+            noise = torch.randn_like(flow_sel) * sigma * math.sqrt(dt)
+            flow_sel = flow_sel + (-flow_sel / tau) * dt + noise
+            flow_sel = torch.clamp(flow_sel, min=-max_flow, max=max_flow)
+            flow = flow.clone()
+            flow[mask] = flow_sel
+        else:
+            noise = torch.randn_like(flow) * sigma * math.sqrt(dt)
+            flow = flow + (-flow / tau) * dt + noise
+            flow = torch.clamp(flow, min=-max_flow, max=max_flow)
+        self.drone.flow_vels[:, 0, :] = flow
+
     def _pre_sim_step(self, tensordict):
+        self._update_flow_disturbance()
         if not getattr(self, "_use_internal_mpc", True):
             try:
                 self._last_action_cmd = tensordict[("agents", "action")].detach()

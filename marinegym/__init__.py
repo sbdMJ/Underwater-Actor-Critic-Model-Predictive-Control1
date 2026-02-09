@@ -1,4 +1,5 @@
 import os
+import sys
 
 import torch
 from tensordict import TensorDict
@@ -42,7 +43,12 @@ def init_simulation_app(cfg):
     # else:
     #     app_experience = f"{os.environ['EXP_PATH']}/omni.isaac.sim.python.kit"
     app_experience = f"{os.environ['EXP_PATH']}/omni.isaac.sim.python.kit"
-    simulation_app = SimulationApp(config, experience=app_experience)
+    original_argv = list(sys.argv)
+    try:
+        sys.argv = [sys.argv[0]]
+        simulation_app = SimulationApp(config, experience=app_experience)
+    finally:
+        sys.argv = original_argv
     
     if config['enable_livestream']:
         from omni.isaac.core.utils.extensions import enable_extension

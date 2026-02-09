@@ -334,7 +334,7 @@ def main(cfg):
             orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
             if orbit_target_mode in ("auto", ""):
                 reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
-                if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+                if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
                     orbit_target_mode = "center"
                 else:
                     orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
@@ -344,7 +344,15 @@ def main(cfg):
                 center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
                 cfg.algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
 
-            cfg.algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            if orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
+                logging.warning(
+                    "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
+                    "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."
+                )
+                include_cylinder_rel = True
+                cfg.task.include_cylinder_rel_in_obs = True
+            cfg.algo.obs_has_cylinder_rel = include_cylinder_rel
 
             if not cfg.algo.get("werr_init", None):
                 q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
@@ -557,6 +565,11 @@ def main(cfg):
     # Save checkpoints by training progress.
     # Default: every 10% of training (override with `save_every_percent`; set <=0 to disable).
     save_every_percent = float(cfg.get("save_every_percent", 0.1))
+    best_metric_key = cfg.get("best_metric_key", "eval/return")
+    best_metric_mode = str(cfg.get("best_metric_mode", "max")).lower()
+    best_metric_value = float("-inf") if best_metric_mode != "min" else float("inf")
+    if best_metric_key in (None, "", "null"):
+        best_metric_key = None
 
     if resume_iter < 0 and resume_frames > 0:
         resume_iter = max(resume_frames // frames_per_batch - 1, -1)
@@ -733,6 +746,49 @@ def main(cfg):
             except AttributeError:
                 logging.warning(f"Policy {policy} does not implement `.state_dict()`")
 
+        def _maybe_save_best(info: dict, step_iter: int):
+            nonlocal best_metric_value
+            if not is_rank0 or best_metric_key is None:
+                return
+            metric_value = info.get(best_metric_key, None)
+            if metric_value is None:
+                return
+            if not isinstance(metric_value, (int, float)):
+                try:
+                    metric_value = float(metric_value)
+                except (TypeError, ValueError):
+                    return
+            improved = metric_value < best_metric_value if best_metric_mode == "min" else metric_value > best_metric_value
+            if not improved:
+                return
+            best_metric_value = metric_value
+            try:
+                ckpt_path = Path(run.dir) / "checkpoint_best.pt"
+                ckpt_dir_best = ckpt_dir / "checkpoint_best.pt"
+                torch.save(_policy_state_dict(), ckpt_path)
+                try:
+                    torch.save(_policy_state_dict(), ckpt_dir_best)
+                except Exception:
+                    pass
+                if bool(cfg.get("save_resume_state", True)):
+                    resume_path = ckpt_path.with_suffix(".resume.pt")
+                    torch.save(_resume_state_for_checkpoint(step_iter, collector._frames), resume_path)
+                    try:
+                        torch.save(
+                            _resume_state_for_checkpoint(step_iter, collector._frames),
+                            ckpt_dir_best.with_suffix(".resume.pt"),
+                        )
+                    except Exception:
+                        pass
+                logging.info(
+                    "Saved best checkpoint to %s (metric=%s value=%.6f)",
+                    str(ckpt_path),
+                    best_metric_key,
+                    metric_value,
+                )
+            except AttributeError:
+                logging.warning(f"Policy {policy} does not implement `.state_dict()`")
+
         initial_steps = resume_frames // frames_per_batch if resume_frames > 0 else 0
         start_iter = resume_iter + 1 if resume_iter >= 0 else 0
         pbar = tqdm(
@@ -811,6 +867,7 @@ def main(cfg):
                 base_env.train()
 
             _maybe_save_checkpoint()
+            _maybe_save_best(info, i)
 
             if is_rank0:
                 run.log(info, step=i)
