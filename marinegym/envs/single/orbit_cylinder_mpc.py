@@ -49,6 +49,7 @@ class OrbitCylinderMPC(HoverMPC):
         self.flow_hybrid_prob = float(flow_cfg.get("hybrid_prob", 0.5))
         self.flow_tau = float(flow_cfg.get("tau", 0.0))
         self.flow_sigma = flow_cfg.get("sigma", getattr(self, "flow_velocity_gaussian_noise", 0.0))
+        self.flow_zero_vertical = bool(flow_cfg.get("zero_vertical", True))
         if getattr(self, "enable_flow", False):
             self._flow_sigma_tensor = torch.tensor(self.flow_sigma, device=self.device, dtype=torch.float32)
             self._flow_max_tensor = torch.tensor(self.max_flow_velocity, device=self.device, dtype=torch.float32)
@@ -858,6 +859,9 @@ class OrbitCylinderMPC(HoverMPC):
             noise = torch.randn_like(flow) * sigma * math.sqrt(dt)
             flow = flow + (-flow / tau) * dt + noise
             flow = torch.clamp(flow, min=-max_flow, max=max_flow)
+        if bool(getattr(self, "flow_zero_vertical", True)) and flow.shape[-1] >= 3:
+            flow = flow.clone()
+            flow[:, 2] = 0.0
         self.drone.flow_vels[:, 0, :] = flow
 
     def _pre_sim_step(self, tensordict):
