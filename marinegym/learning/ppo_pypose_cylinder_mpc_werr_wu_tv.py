@@ -96,6 +96,11 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     total_wu_ub: float = 0.2
     # Keep tangential-speed term active so orbit progress does not vanish.
     werr_tan_min: float = 2.0
+    # Structural option: add a bounded residual action on top of MPC output.
+    # This helps recover from model mismatch / short-horizon myopia while retaining MPC prior.
+    use_residual_action: bool = True
+    residual_action_max: float = 0.15
+    residual_gate_k: float = 3.0
     gamma_d_max: float = 5.0
 
     critic_worstcase_k: int = 1
@@ -311,9 +316,11 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
             nn.LayerNorm(hidden),
         )
         self.actor_head = nn.Linear(hidden, 2)
+        self.residual_head = nn.Linear(hidden, self.nu)
         # actor outputs:
         #   actor_out[..., 0] -> raw R
         #   actor_out[..., 1] -> raw disturbance gain gamma_d
+        #   residual_head -> bounded residual action (added to MPC output)
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -375,6 +382,16 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
             )
         except Exception:
             u0 = torch.zeros((root_state.shape[0], self.nu), device=root_state.device, dtype=root_state.dtype)
+
+        if bool(getattr(self.cfg, "use_residual_action", True)):
+            # Gate residual by orbit-radius error so corrections are strong off-orbit,
+            # and naturally fade near nominal orbit.
+            gate_k = float(getattr(self.cfg, "residual_gate_k", 3.0))
+            gate = torch.tanh(gate_k * orbit_err).unsqueeze(-1)
+            residual_raw = self.residual_head(actor_feat)
+            residual = torch.tanh(residual_raw) * float(getattr(self.cfg, "residual_action_max", 0.15))
+            u0 = u0 + gate * residual
+
         u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
 
         loc = u0.view(*batch_shape, 1, self.nu).to(dtype=obs.dtype)
