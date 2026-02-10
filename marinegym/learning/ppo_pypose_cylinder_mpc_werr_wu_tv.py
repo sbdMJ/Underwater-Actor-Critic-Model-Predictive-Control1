@@ -273,8 +273,25 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
 
         self.register_buffer("base_werr", werr0.view(1, 1, self.ne), persistent=False)
         self.register_buffer("base_wu", wu0.view(1, 1, self.nu), persistent=False)
-        self.last_temporal_smooth_loss = torch.tensor(0.0)
-        self.last_horizon_smooth_loss = torch.tensor(0.0)
+        # Keep these as leaf buffers so deepcopy(policy) in TorchRL collectors remains valid.
+        self.register_buffer("last_temporal_smooth_loss", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.register_buffer("last_horizon_smooth_loss", torch.zeros((), dtype=torch.float32), persistent=False)
+
+    def _compute_delta_q(self, raw_e: torch.Tensor) -> torch.Tensor:
+        delta_lim = float(getattr(self.cfg, "q_delta_log_limit", 1.0986122886681098))
+        return raw_e.clamp(min=-delta_lim, max=delta_lim)
+
+    def compute_smoothness_penalty(self, obs_flat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (temporal_smooth, horizon_smooth) with autograd support."""
+        feat = self.trunk(obs_flat)
+        raw = self.head(feat).view(obs_flat.shape[0], self.horizon, self.ne + self.nu)
+        delta_q = self._compute_delta_q(raw[..., : self.ne])
+
+        dq_diff_t = delta_q[1:, :, :] - delta_q[:-1, :, :]
+        dq_diff_h = delta_q[:, 1:, :] - delta_q[:, :-1, :]
+        temporal = dq_diff_t.square().mean() if dq_diff_t.numel() > 0 else delta_q.new_zeros(())
+        horizon = dq_diff_h.square().mean() if dq_diff_h.numel() > 0 else delta_q.new_zeros(())
+        return temporal, horizon
 
     def forward(self, obs_flat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.fixed_cost_weights:
@@ -291,8 +308,7 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         raw = self.head(feat).view(obs_flat.shape[0], self.horizon, self.ne + self.nu)
         raw_e = raw[..., : self.ne]
 
-        delta_lim = float(getattr(self.cfg, "q_delta_log_limit", 1.0986122886681098))
-        delta_q = raw_e.clamp(min=-delta_lim, max=delta_lim)
+        delta_q = self._compute_delta_q(raw_e)
         w_err = self.base_werr.to(device=obs_flat.device, dtype=obs_flat.dtype) * torch.exp(delta_q)
 
         # Keep R fixed to R0 for training stability unless explicitly enabled.
@@ -307,10 +323,10 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         else:
             w_u = self.base_wu.to(device=obs_flat.device, dtype=obs_flat.dtype).expand(obs_flat.shape[0], self.horizon, self.nu)
 
-        dq_diff_t = delta_q[1:, :, :] - delta_q[:-1, :, :]
-        dq_diff_h = delta_q[:, 1:, :] - delta_q[:, :-1, :]
-        self.last_temporal_smooth_loss = dq_diff_t.square().mean() if dq_diff_t.numel() > 0 else delta_q.new_zeros(())
-        self.last_horizon_smooth_loss = dq_diff_h.square().mean() if dq_diff_h.numel() > 0 else delta_q.new_zeros(())
+        # Diagnostics only: store detached values in pre-registered buffers.
+        temporal, horizon = self.compute_smoothness_penalty(obs_flat)
+        self.last_temporal_smooth_loss.copy_(temporal.detach().to(dtype=self.last_temporal_smooth_loss.dtype))
+        self.last_horizon_smooth_loss.copy_(horizon.detach().to(dtype=self.last_horizon_smooth_loss.dtype))
 
         return w_err, w_u
 
@@ -588,12 +604,11 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
             actor_core = self.actor.module.module
             cost_map = getattr(actor_core, "cost_map", None)
             if cost_map is not None:
-                temporal = getattr(cost_map, "last_temporal_smooth_loss", None)
-                horizon = getattr(cost_map, "last_horizon_smooth_loss", None)
-                if temporal is not None:
-                    smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_temporal_coef", 0.0)) * temporal
-                if horizon is not None:
-                    smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_horizon_coef", 0.0)) * horizon
+                obs = tensordict[("agents", "observation")].squeeze(-2)
+                obs_flat = torch.nan_to_num(obs.reshape(-1, obs.shape[-1]))
+                temporal, horizon = cost_map.compute_smoothness_penalty(obs_flat)
+                smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_temporal_coef", 0.0)) * temporal
+                smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_horizon_coef", 0.0)) * horizon
         except Exception:
             pass
 
