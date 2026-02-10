@@ -321,10 +321,7 @@ def main(cfg):
     mode = str(cfg.get("mode", "")).lower()
     policy_control = bool(eval_cfg.get("policy_control", True))
 
-    # Ensure controller-only mode actually runs PyPose iLQR MPC for PyPose algos.
     algo_name = str(cfg.algo.name).lower()
-    if (not policy_control) and algo_name.startswith("ppo_pypose_"):
-        cfg.task.use_pypose_mpc = True
 
     # OrbitCylinderMPC evaluation mode:
     # - policy_control=True : evaluate learned policy (direct actions)
@@ -401,12 +398,6 @@ def main(cfg):
     env = TransformedEnv(base_env, Compose(InitTracker())).eval()
     env.set_seed(seed)
     base_env.enable_render(render)
-
-    if str(getattr(cfg, "task", {}).get("name", "")) == "OrbitCylinderMPC":
-        print(
-            f"[eval] policy_control={policy_control} control_mode={cfg.task.control_mode} "
-            f"use_internal_mpc={cfg.task.get('use_internal_mpc', None)} use_pypose_mpc={cfg.task.get('use_pypose_mpc', None)}"
-        )
 
     if algo_name.startswith("ppo_pypose_mpc_") or algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
         _maybe_prepare_pypose_mpc_cfg(cfg, base_env, algo_name=algo_name, out_dir=Path.cwd() / algo_name)
