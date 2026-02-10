@@ -105,7 +105,7 @@ reward_orbit_stationary_start_steps: 60
 reward_orbit_stationary_full_steps: 240
 
 # Cylinder-aware MPC 설정
-mpc_horizon: 10
+mpc_horizon: 5
 mpc_r_u: 0.001
 mpc_q_radial: 100.0
 mpc_q_z: 100.0
@@ -153,8 +153,8 @@ include_cylinder_rel_in_obs: false
 use_pypose_mpc: true
 pypose_orbit_mode: cylinder_cost
 pypose_orbit_waypoint_lookahead_steps: 20
-pypose_mpc_horizon: 10
-pypose_mpc_ilqr_iters: 4
+pypose_mpc_horizon: 5
+pypose_mpc_ilqr_iters: 6
 pypose_mpc_ilqr_reg: 1e-3
 pypose_mpc_terminal_weight_mult: 50.0
 # If unset, falls back to mpc_max_thruster_force.
@@ -168,7 +168,7 @@ pypose_wp_mpc_q_omega: 0.5
 pypose_wp_mpc_r_u: 0.01
 
 # PPO + PyPose MPC(algo=ppo_pypose_mpc_qrdiag_tv) init defaults (scripts/train.py uses these keys)
-mpc_ilqr_iters: 4
+mpc_ilqr_iters: 6
 mpc_q_pos: 50.0
 mpc_q_quat: 30.0
 mpc_q_vel: 2.0
