@@ -91,6 +91,12 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     R_min_coeff: float = 0.2
     gamma_d_max: float = 5.0
 
+    # AC-MPC stabilization: keep R fixed, only adapt Q = Q0 * exp(delta_q).
+    learn_r: bool = False
+    q_delta_log_limit: float = 1.0986122886681098  # ln(3)
+    q_smooth_temporal_coef: float = 1e-3
+    q_smooth_horizon_coef: float = 1e-3
+
     critic_worstcase_k: int = 1
 
     # Optional init (populated by scripts/train.py).
@@ -265,6 +271,11 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
             self.register_buffer("fixed_werr", fixed_werr.view(1, 1, self.ne), persistent=False)
             self.register_buffer("fixed_wu", fixed_wu.view(1, 1, self.nu), persistent=False)
 
+        self.register_buffer("base_werr", werr0.view(1, 1, self.ne), persistent=False)
+        self.register_buffer("base_wu", wu0.view(1, 1, self.nu), persistent=False)
+        self.last_temporal_smooth_loss = torch.tensor(0.0)
+        self.last_horizon_smooth_loss = torch.tensor(0.0)
+
     def forward(self, obs_flat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.fixed_cost_weights:
             B = int(obs_flat.shape[0])
@@ -279,20 +290,28 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         feat = self.trunk(obs_flat)
         raw = self.head(feat).view(obs_flat.shape[0], self.horizon, self.ne + self.nu)
         raw_e = raw[..., : self.ne]
-        raw_u = raw[..., self.ne :]
 
-        w_err = _map_raw_to_positive(
-            raw_e,
-            float(self.cfg.werr_lb),
-            float(self.cfg.werr_ub),
-            log_scale=bool(self.cfg.weights_log_scale),
-        )
-        w_u = _map_raw_to_positive(
-            raw_u,
-            float(self.cfg.wu_lb),
-            float(self.cfg.wu_ub),
-            log_scale=bool(self.cfg.weights_log_scale),
-        )
+        delta_lim = float(getattr(self.cfg, "q_delta_log_limit", 1.0986122886681098))
+        delta_q = raw_e.clamp(min=-delta_lim, max=delta_lim)
+        w_err = self.base_werr.to(device=obs_flat.device, dtype=obs_flat.dtype) * torch.exp(delta_q)
+
+        # Keep R fixed to R0 for training stability unless explicitly enabled.
+        if bool(getattr(self.cfg, "learn_r", False)):
+            raw_u = raw[..., self.ne :]
+            w_u = _map_raw_to_positive(
+                raw_u,
+                float(self.cfg.wu_lb),
+                float(self.cfg.wu_ub),
+                log_scale=bool(self.cfg.weights_log_scale),
+            )
+        else:
+            w_u = self.base_wu.to(device=obs_flat.device, dtype=obs_flat.dtype).expand(obs_flat.shape[0], self.horizon, self.nu)
+
+        dq_diff_t = delta_q[1:, :, :] - delta_q[:-1, :, :]
+        dq_diff_h = delta_q[:, 1:, :] - delta_q[:, :-1, :]
+        self.last_temporal_smooth_loss = dq_diff_t.square().mean() if dq_diff_t.numel() > 0 else delta_q.new_zeros(())
+        self.last_horizon_smooth_loss = dq_diff_h.square().mean() if dq_diff_h.numel() > 0 else delta_q.new_zeros(())
+
         return w_err, w_u
 
 
@@ -337,7 +356,7 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         )
         self.actor_head = nn.Linear(hidden, 2)
         # actor outputs:
-        #   actor_out[..., 0] -> raw R
+        #   actor_out[..., 0] -> reserved (unused when R is fixed)
         #   actor_out[..., 1] -> raw disturbance gain gamma_d
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
 
@@ -362,15 +381,10 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         r_raw = actor_out[:, 0]
         gamma_d_raw = actor_out[:, 1]
 
-        R_base = torch.exp(r_raw)
-        dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
-        orbit_err = torch.abs(dist_xy - float(self.cfg.orbit_radius))
-        R_min = float(self.cfg.R_min_coeff) * orbit_err
-        R = R_base + R_min
+        _ = r_raw
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
-        w_u_seq = w_u_seq + R.view(-1, 1, 1)
 
         if bool(getattr(self.cfg, "obs_has_cylinder_rel", False)):
             center = obs_flat[:, -3:].to(dtype=root_state.dtype)  # cylinder_center - target_pos
@@ -569,7 +583,21 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
         value_loss_original = self.critic_loss_fn(b_returns, values)
         value_loss = torch.max(value_loss_original, value_loss_clipped)
 
-        loss = policy_loss + entropy_loss + value_loss
+        smooth_loss = torch.tensor(0.0, device=policy_loss.device)
+        try:
+            actor_core = self.actor.module.module
+            cost_map = getattr(actor_core, "cost_map", None)
+            if cost_map is not None:
+                temporal = getattr(cost_map, "last_temporal_smooth_loss", None)
+                horizon = getattr(cost_map, "last_horizon_smooth_loss", None)
+                if temporal is not None:
+                    smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_temporal_coef", 0.0)) * temporal
+                if horizon is not None:
+                    smooth_loss = smooth_loss + float(getattr(self.cfg, "q_smooth_horizon_coef", 0.0)) * horizon
+        except Exception:
+            pass
+
+        loss = policy_loss + entropy_loss + value_loss + smooth_loss
         self.actor_opt.zero_grad()
         self.critic_opt.zero_grad()
         loss.backward()
@@ -593,6 +621,7 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
                 "actor_grad_norm": actor_grad_norm,
                 "critic_grad_norm": critic_grad_norm,
                 "explained_var": explained_var,
+                "q_smooth_loss": smooth_loss.detach(),
             },
             [],
         )

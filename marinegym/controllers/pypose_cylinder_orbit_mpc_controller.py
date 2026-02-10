@@ -13,6 +13,7 @@ State / Input 정의는 기존 MPC와 동일합니다.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import torch
@@ -133,15 +134,19 @@ class _UnderwaterVehicleNLS(pp.module.NLS if _PYPOSE_AVAILABLE else object):
 
         nu = torch.cat([v, w], dim=-1)  # (..., 6)
 
-        # exogenous flow input (body-frame linear flow) for relative-velocity damping
+        # exogenous flow input (world-frame linear flow) for relative-velocity damping
         if t is None:
-            flow_b = torch.zeros_like(v)
+            flow_w = torch.zeros_like(v)
         else:
-            flow_b = torch.as_tensor(t, dtype=v.dtype, device=v.device)
-            if flow_b.shape == (3,):
-                flow_b = flow_b.view(1, 3).expand(v.shape[0], 3)
-            if flow_b.shape != v.shape:
-                raise ValueError(f"flow_b(t) must have shape {tuple(v.shape)} or (3,), got {tuple(flow_b.shape)}")
+            flow_w = torch.as_tensor(t, dtype=v.dtype, device=v.device)
+            if flow_w.shape == (3,):
+                flow_w = flow_w.view(1, 3).expand(v.shape[0], 3)
+            if flow_w.shape != v.shape:
+                raise ValueError(f"flow_w(t) must have shape {tuple(v.shape)} or (3,), got {tuple(flow_w.shape)}")
+
+        # Convert world flow to body frame with the predicted attitude q_k.
+        R = quaternion_to_rotation_matrix(q)
+        flow_b = torch.einsum("...ji,...j->...i", R, flow_w)
         nu_rel = torch.cat([v - flow_b, w], dim=-1)
 
         # coriolis
@@ -158,9 +163,6 @@ class _UnderwaterVehicleNLS(pp.module.NLS if _PYPOSE_AVAILABLE else object):
 
         # damping: (D_lin + D_quad*|nu|) nu  (D_* are diagonal)
         damping = (self.d_lin + self.d_quad * torch.abs(nu_rel)) * nu_rel
-
-        # rotation (body -> world)
-        R = quaternion_to_rotation_matrix(q)
 
         # gravity/buoyancy in body frame
         f_g_body = torch.einsum("...ji,...j->...i", R, self._f_g_world.to(dtype=R.dtype, device=R.device))
@@ -351,6 +353,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self._last_solve_stats: dict[str, float | int | bool | str] = {}
         self._diag_accum: dict[str, float] = {}
         self._diag_count: int = 0
+        self._prev_energy_mean: float | None = None
         self.requires_grad_(False)
 
     def _trajectory_cost(
@@ -414,7 +417,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self._diag_count += 1
         self._diag_accum["n_iters"] = self._diag_accum.get("n_iters", 0.0) + float(stats.get("n_iters", 0.0))
         self._diag_accum["converged"] = self._diag_accum.get("converged", 0.0) + (1.0 if bool(stats.get("converged", False)) else 0.0)
-        for k in ("final_cost", "cost_reduction", "alpha", "lambda"):
+        for k in ("final_cost", "cost_reduction", "alpha", "lambda", "sat_ratio", "roll_abs", "pitch_abs", "v_rel_norm", "energy_spike"):
             self._diag_accum[k] = self._diag_accum.get(k, 0.0) + float(stats.get(k, 0.0))
 
     def get_and_reset_diagnostics(self) -> dict[str, float | str]:
@@ -431,21 +434,36 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             "ilqr_cost_reduction": self._diag_accum.get("cost_reduction", 0.0) / n,
             "ilqr_alpha": self._diag_accum.get("alpha", 0.0) / n,
             "ilqr_lambda": self._diag_accum.get("lambda", 0.0) / n,
+            "sat_ratio": self._diag_accum.get("sat_ratio", 0.0) / n,
+            "roll_abs": self._diag_accum.get("roll_abs", 0.0) / n,
+            "pitch_abs": self._diag_accum.get("pitch_abs", 0.0) / n,
+            "v_rel_norm": self._diag_accum.get("v_rel_norm", 0.0) / n,
+            "energy_spike": self._diag_accum.get("energy_spike", 0.0) / n,
             "ilqr_stop_reason": str(self._last_solve_stats.get("stop_reason", "none")),
         }
         self._diag_accum = {}
         self._diag_count = 0
         return out
 
-    def _dynamics(self, x: torch.Tensor, u: torch.Tensor, flow_b: torch.Tensor | None = None) -> torch.Tensor:
-        return self.system.state_transition(x, u, flow_b)
+    def _dynamics(self, x: torch.Tensor, u: torch.Tensor, flow_w: torch.Tensor | None = None) -> torch.Tensor:
+        return self.system.state_transition(x, u, flow_w)
 
-    def _rollout(self, x0: torch.Tensor, u_traj: torch.Tensor, flow_b_seq: torch.Tensor | None = None) -> torch.Tensor:
+    def _rollout(
+        self,
+        x0: torch.Tensor,
+        u_traj: torch.Tensor,
+        flow_w_seq: torch.Tensor | None = None,
+        flow_w_fn: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         xs = [x0]
         x = x0
         for t in range(u_traj.shape[1]):
-            flow_bt = None if flow_b_seq is None else flow_b_seq[:, t, :]
-            x = self._dynamics(x, u_traj[:, t, :], flow_bt)
+            flow_wt = None
+            if flow_w_fn is not None:
+                flow_wt = flow_w_fn(x, t)
+            elif flow_w_seq is not None:
+                flow_wt = flow_w_seq[:, t, :]
+            x = self._dynamics(x, u_traj[:, t, :], flow_wt)
             xs.append(x)
         return torch.stack(xs, dim=1)  # (B, T+1, nx)
 
@@ -464,7 +482,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         w_u_seq: torch.Tensor | None = None,
         gamma_d: torch.Tensor | None = None,
         x_meas_seq: torch.Tensor | None = None,
-        flow_b_seq: torch.Tensor | None = None,
+        flow_w_seq: torch.Tensor | None = None,
+        flow_w_fn: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, float | int | bool | str]]:
         try:
             from torch.func import jacrev, vmap  # type: ignore
@@ -531,10 +550,10 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         gamma_d_b = None
 
         flow_seq = None
-        if flow_b_seq is not None:
-            flow_seq = flow_b_seq.to(device=device, dtype=dtype)
+        if flow_w_seq is not None:
+            flow_seq = flow_w_seq.to(device=device, dtype=dtype)
             if flow_seq.shape != (B, T, 3):
-                raise ValueError(f"flow_b_seq must have shape ({B},{T},3). got {tuple(flow_seq.shape)}")
+                raise ValueError(f"flow_w_seq must have shape ({B},{T},3). got {tuple(flow_seq.shape)}")
         if gamma_d is not None:
             gamma_d_b = torch.as_tensor(gamma_d, dtype=dtype, device=device).reshape(-1)
             if gamma_d_b.numel() == 1 and B > 1:
@@ -542,7 +561,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             if gamma_d_b.numel() != B:
                 raise ValueError(f"gamma_d must have shape ({B},) or scalar. got {tuple(gamma_d_b.shape)}")
 
-        x_traj0 = self._rollout(x0, u, flow_seq)
+        x_traj0 = self._rollout(x0, u, flow_seq, flow_w_fn)
         initial_cost = self._trajectory_cost(
             x_traj0,
             u,
@@ -562,7 +581,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
 
         for it in range(self.ilqr_iters):
             n_iters = it + 1
-            x_traj = self._rollout(x0, u, flow_seq)  # (B, T+1, nx)
+            x_traj = self._rollout(x0, u, flow_seq, flow_w_fn)  # (B, T+1, nx)
             cost_before = self._trajectory_cost(
                 x_traj,
                 u,
@@ -585,7 +604,18 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             # dynamics jacobians (flatten (B,T) for fewer kernel launches)
             x_flat = x_traj[:, :-1, :].reshape(B * T, self.nx)
             u_flat = u.reshape(B * T, nu)
-            if flow_seq is None:
+            if flow_w_fn is not None:
+                flow_list = []
+                for tt in range(T):
+                    flow_t = flow_w_fn(x_traj[:, tt, :], tt)
+                    flow_t = torch.as_tensor(flow_t, dtype=dtype, device=device)
+                    if flow_t.shape == (3,):
+                        flow_t = flow_t.view(1, 3).expand(B, 3)
+                    if flow_t.shape != (B, 3):
+                        raise ValueError(f"flow_w_fn must return ({B},3) or (3,), got {tuple(flow_t.shape)} at t={tt}")
+                    flow_list.append(flow_t)
+                flow_flat = torch.stack(flow_list, dim=1).reshape(B * T, 3)
+            elif flow_seq is None:
                 flow_flat = torch.zeros(B * T, 3, device=device, dtype=dtype)
             else:
                 flow_flat = flow_seq.reshape(B * T, 3)
@@ -689,12 +719,15 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 ut = u[:, t, :] + k[:, t, :] + torch.einsum("bij,bj->bi", K[:, t, :, :], dx)
                 ut = ut.clamp(-1.0, 1.0)
                 new_u.append(ut)
-                flow_bt = None if flow_seq is None else flow_seq[:, t, :]
-                x = self._dynamics(x, ut, flow_bt)
+                if flow_w_fn is not None:
+                    flow_wt = flow_w_fn(x, t)
+                else:
+                    flow_wt = None if flow_seq is None else flow_seq[:, t, :]
+                x = self._dynamics(x, ut, flow_wt)
             u = torch.stack(new_u, dim=1)
             last_alpha = 1.0
 
-            x_after = self._rollout(x0, u, flow_seq)
+            x_after = self._rollout(x0, u, flow_seq, flow_w_fn)
             cost_after = self._trajectory_cost(
                 x_after,
                 u,
@@ -713,7 +746,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 stop_reason = "small_reduction"
                 break
 
-        final_x = self._rollout(x0, u, flow_seq)
+        final_x = self._rollout(x0, u, flow_seq, flow_w_fn)
         final_cost = self._trajectory_cost(
             final_x,
             u,
@@ -760,7 +793,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         gamma_d: torch.Tensor | None = None,
         x_meas_seq: torch.Tensor | None = None,
         skip_gamma_d_without_x_meas_seq: bool = True,
-        flow_b: torch.Tensor | None = None,
+        flow_w: torch.Tensor | None = None,
+        flow_w_fn: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         x0 = root_state.reshape(-1, root_state.shape[-1])
         c = center_w.reshape(-1, center_w.shape[-1])
@@ -782,16 +816,16 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             u_init = self._u_warm.to(device=device, dtype=dtype)
 
 
-        flow_b_seq = None
-        if flow_b is not None:
-            flow_b_now = torch.as_tensor(flow_b, dtype=dtype, device=device)
-            if flow_b_now.ndim == 1 and flow_b_now.numel() == 3:
-                flow_b_now = flow_b_now.view(1, 3).expand(B, 3)
-            elif flow_b_now.ndim == 2 and flow_b_now.shape == (B, 3):
+        flow_w_seq = None
+        if flow_w is not None:
+            flow_w_now = torch.as_tensor(flow_w, dtype=dtype, device=device)
+            if flow_w_now.ndim == 1 and flow_w_now.numel() == 3:
+                flow_w_now = flow_w_now.view(1, 3).expand(B, 3)
+            elif flow_w_now.ndim == 2 and flow_w_now.shape == (B, 3):
                 pass
             else:
-                raise ValueError(f"flow_b must have shape (3,) or ({B},3). got {tuple(flow_b_now.shape)}")
-            flow_b_seq = flow_b_now.view(B, 1, 3).expand(B, self.horizon, 3)
+                raise ValueError(f"flow_w must have shape (3,) or ({B},3). got {tuple(flow_w_now.shape)}")
+            flow_w_seq = flow_w_now.view(B, 1, 3).expand(B, self.horizon, 3)
 
         gamma_d_eff = gamma_d
         if skip_gamma_d_without_x_meas_seq and x_meas_seq is None:
@@ -810,9 +844,39 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             w_u_seq=w_u_seq,
             gamma_d=gamma_d_eff,
             x_meas_seq=x_meas_seq,
-            flow_b_seq=flow_b_seq,
+            flow_w_seq=flow_w_seq,
+            flow_w_fn=flow_w_fn,
         )
         self._u_warm = torch.cat([u_traj[:, 1:, :], torch.zeros_like(u_traj[:, :1, :])], dim=1).detach()
+
+        sat_ratio = float((u_traj.abs() >= 0.99).float().mean().detach().item())
+        q0 = normalize(x0d[:, 3:7])
+        roll0, pitch0 = _quat_to_rp(q0)
+        roll_abs = float(roll0.abs().mean().detach().item())
+        pitch_abs = float(pitch0.abs().mean().detach().item())
+        v_b0 = x0d[:, 7:10]
+        if flow_w is None:
+            flow_w0 = torch.zeros_like(v_b0)
+        else:
+            flow_w0 = torch.as_tensor(flow_w, dtype=dtype, device=device)
+            if flow_w0.shape == (3,):
+                flow_w0 = flow_w0.view(1, 3).expand(B, 3)
+        R0 = quaternion_to_rotation_matrix(q0)
+        flow_b0 = torch.einsum("...ji,...j->...i", R0, flow_w0)
+        v_rel_norm = float((v_b0 - flow_b0).norm(dim=-1).mean().detach().item())
+        energy_mean = float((u_traj.abs() ** 3).sum(dim=-1).mean().detach().item())
+        if self._prev_energy_mean is None:
+            energy_spike = 0.0
+        else:
+            energy_spike = max(0.0, energy_mean - float(self._prev_energy_mean))
+        self._prev_energy_mean = energy_mean
+        solve_stats.update({
+            "sat_ratio": sat_ratio,
+            "roll_abs": roll_abs,
+            "pitch_abs": pitch_abs,
+            "v_rel_norm": v_rel_norm,
+            "energy_spike": float(energy_spike),
+        })
         self._accumulate_diagnostics(solve_stats)
 
         u0 = u_traj[:, 0, :].to(dtype=root_state.dtype)

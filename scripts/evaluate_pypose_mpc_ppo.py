@@ -429,6 +429,13 @@ def main(cfg):
     flow_log = []
     done_log = []
     step_log = []
+    sat_ratio_log = []
+    roll_log = []
+    pitch_log = []
+    ilqr_iters_log = []
+    ilqr_conv_log = []
+    v_rel_log = []
+    energy_spike_log = []
 
     traj_nu = int(getattr(base_env.drone, "num_rotors", 0) or 0)
     if traj_nu <= 0:
@@ -559,6 +566,26 @@ def main(cfg):
                         print(f"[eval] t={t} return={float(r.mean().item()):.4g} pos_error={float(pe.mean().item()):.4g}")
                 except Exception:
                     pass
+                try:
+                    if mpc_actor is not None and hasattr(mpc_actor, "mpc"):
+                        diag = mpc_actor.mpc.get_and_reset_diagnostics()
+                        if diag:
+                            sat_ratio_log.append(float(diag.get("sat_ratio", np.nan)))
+                            roll_log.append(float(diag.get("roll_abs", np.nan)))
+                            pitch_log.append(float(diag.get("pitch_abs", np.nan)))
+                            ilqr_iters_log.append(float(diag.get("ilqr_n_iters", np.nan)))
+                            ilqr_conv_log.append(float(diag.get("ilqr_converged", np.nan)))
+                            v_rel_log.append(float(diag.get("v_rel_norm", np.nan)))
+                            energy_spike_log.append(float(diag.get("energy_spike", np.nan)))
+                            print(
+                                "[eval][mpc] "
+                                f"sat_ratio={diag.get('sat_ratio', float('nan')):.4f} "
+                                f"roll={diag.get('roll_abs', float('nan')):.4f} pitch={diag.get('pitch_abs', float('nan')):.4f} "
+                                f"iters={diag.get('ilqr_n_iters', float('nan')):.2f} conv={diag.get('ilqr_converged', float('nan')):.2f} "
+                                f"v_rel={diag.get('v_rel_norm', float('nan')):.4f} energy_spike={diag.get('energy_spike', float('nan')):.4f}"
+                            )
+                except Exception:
+                    pass
 
             if mpc_actor is not None and print_weights_every > 0 and t % print_weights_every == 0:
                 try:
@@ -684,6 +711,13 @@ def main(cfg):
                 flow_vel_w=flow_arr,
                 current_vec_w=current_vec_w,
                 done=done_arr,
+                sat_ratio=np.asarray(sat_ratio_log, dtype=np.float32),
+                roll_abs=np.asarray(roll_log, dtype=np.float32),
+                pitch_abs=np.asarray(pitch_log, dtype=np.float32),
+                ilqr_iters=np.asarray(ilqr_iters_log, dtype=np.float32),
+                ilqr_converged=np.asarray(ilqr_conv_log, dtype=np.float32),
+                v_rel_norm=np.asarray(v_rel_log, dtype=np.float32),
+                energy_spike=np.asarray(energy_spike_log, dtype=np.float32),
                 cylinder_center=center,
                 cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
                 cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),

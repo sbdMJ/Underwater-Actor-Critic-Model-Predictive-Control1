@@ -8,7 +8,7 @@ from torchrl.data import UnboundedContinuousTensorSpec
 
 from marinegym.envs.single.hover_mpc import HoverMPC
 from marinegym.rewards.orbit_ppo import OrbitPPORewardCfg, compute_orbit_ppo_reward_terms
-from marinegym.utils.torch import quat_axis, euler_to_quaternion, quat_rotate_inverse
+from marinegym.utils.torch import quat_axis, euler_to_quaternion
 
 
 class OrbitCylinderMPC(HoverMPC):
@@ -912,7 +912,6 @@ class OrbitCylinderMPC(HoverMPC):
 
             center_env = self.cylinder_center.squeeze(0).expand(self.num_envs, 3)  # (num_envs, 3)
             flow_w = self.drone.flow_vels[:, 0, 0:3]
-            flow_b = quat_rotate_inverse(self.drone.rot.squeeze(1), flow_w)
             cmds = self.controller.compute(
                 root_state,
                 center_w=center_env,
@@ -921,7 +920,7 @@ class OrbitCylinderMPC(HoverMPC):
                 v_tan=self.orbit_v_tan,
                 direction=self.orbit_direction,
                 yaw_offset=self.orbit_yaw_offset,
-                flow_b=flow_b,
+                flow_w=flow_w,
             ).unsqueeze(1)
             tensordict.set(("agents", "action"), cmds)
             try:
