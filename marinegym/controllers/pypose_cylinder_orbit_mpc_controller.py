@@ -657,45 +657,33 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             K = torch.stack(list(reversed(K)), dim=1)  # (B, T, nu, nx)
             k = torch.stack(list(reversed(k)), dim=1)  # (B, T, nu)
 
-            # forward update with simple line-search over alpha
-            best_u = u
-            best_cost = cost_before
-            alpha_candidates = (1.0, 0.5, 0.25, 0.1)
-            for alpha in alpha_candidates:
-                x = x0
-                new_u = []
-                for t in range(T):
-                    dx = x - x_traj[:, t, :]
-                    ut = u[:, t, :] + alpha * k[:, t, :] + torch.einsum("bij,bj->bi", K[:, t, :, :], dx)
-                    ut = ut.clamp(-1.0, 1.0)
-                    new_u.append(ut)
-                    x = self._dynamics(x, ut)
-                cand_u = torch.stack(new_u, dim=1)
-                cand_x = self._rollout(x0, cand_u)
-                cand_cost = self._trajectory_cost(
-                    cand_x,
-                    cand_u,
-                    center_w=center_w,
-                    radius_t=radius_t,
-                    z_t=z_t,
-                    v_tan_t=v_tan_t,
-                    dir_sign=dir_sign,
-                    yaw_offset_t=yaw_offset_t,
-                    w_err_seq=w_err_seq,
-                    w_u_seq=w_u_seq,
-                )
-                if torch.isfinite(cand_cost).all() and (cand_cost.mean() <= best_cost.mean()):
-                    best_cost = cand_cost
-                    best_u = cand_u
-                    last_alpha = float(alpha)
-                    break
+            # forward update (alpha=1): keep controller behavior aligned with the original implementation.
+            # We still compute cost reduction for diagnostics, but we do not early-stop on no-descent.
+            x = x0
+            new_u = []
+            for t in range(T):
+                dx = x - x_traj[:, t, :]
+                ut = u[:, t, :] + k[:, t, :] + torch.einsum("bij,bj->bi", K[:, t, :, :], dx)
+                ut = ut.clamp(-1.0, 1.0)
+                new_u.append(ut)
+                x = self._dynamics(x, ut)
+            u = torch.stack(new_u, dim=1)
+            last_alpha = 1.0
 
-            rel_red = ((cost_before.mean() - best_cost.mean()) / cost_before.mean().abs().clamp_min(1e-9)).item()
-            if best_cost.mean() <= cost_before.mean():
-                u = best_u
-            else:
-                stop_reason = "no_descent"
-                break
+            x_after = self._rollout(x0, u)
+            cost_after = self._trajectory_cost(
+                x_after,
+                u,
+                center_w=center_w,
+                radius_t=radius_t,
+                z_t=z_t,
+                v_tan_t=v_tan_t,
+                dir_sign=dir_sign,
+                yaw_offset_t=yaw_offset_t,
+                w_err_seq=w_err_seq,
+                w_u_seq=w_u_seq,
+            )
+            rel_red = ((cost_before.mean() - cost_after.mean()) / cost_before.mean().abs().clamp_min(1e-9)).item()
             if rel_red < 1e-4:
                 converged = True
                 stop_reason = "small_reduction"
