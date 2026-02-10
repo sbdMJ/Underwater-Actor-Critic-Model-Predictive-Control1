@@ -317,19 +317,25 @@ def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
-    # OrbitCylinderMPC: ensure we evaluate the *policy* (direct thruster actions),
-    # not the env's internal MPC override (which is enabled when control_mode=mpc).
-    if str(getattr(cfg, "task", {}).get("name", "")) == "OrbitCylinderMPC":
-        cfg.task.control_mode = "direct"
-        cfg.task.use_internal_mpc = False
-
     eval_cfg = cfg.get("eval", {}) or {}
     mode = str(cfg.get("mode", "")).lower()
+    policy_control = bool(eval_cfg.get("policy_control", True))
+
+    # OrbitCylinderMPC evaluation mode:
+    # - policy_control=True : evaluate learned policy (direct actions)
+    # - policy_control=False: run controller-only (env internal MPC)
+    if str(getattr(cfg, "task", {}).get("name", "")) == "OrbitCylinderMPC":
+        if policy_control:
+            cfg.task.control_mode = "direct"
+            cfg.task.use_internal_mpc = False
+        else:
+            cfg.task.control_mode = "mpc"
+            cfg.task.use_internal_mpc = True
     ckpt = eval_cfg.get("ckpt", None)
     if not ckpt:
         ckpt = str(Path.cwd() / "checkpoints" / "checkpoint_final.pt")
     ckpt_path = Path(str(ckpt)).expanduser()
-    if not ckpt_path.exists():
+    if policy_control and not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     steps = int(eval_cfg.get("steps", 2000))
@@ -395,16 +401,18 @@ def main(cfg):
     if algo_name.startswith("ppo_pypose_mpc_") or algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
         _maybe_prepare_pypose_mpc_cfg(cfg, base_env, algo_name=algo_name, out_dir=Path.cwd() / algo_name)
 
-    policy = ALGOS[algo_name](
-        cfg.algo,
-        env.observation_spec,
-        env.action_spec,
-        env.reward_spec,
-        device=base_env.device,
-    )
-    _load_policy_state(policy, ckpt_path, device="cpu")
-
-    mpc_actor = _find_pypose_tv_actor(policy)
+    policy = None
+    mpc_actor = None
+    if policy_control:
+        policy = ALGOS[algo_name](
+            cfg.algo,
+            env.observation_spec,
+            env.action_spec,
+            env.reward_spec,
+            device=base_env.device,
+        )
+        _load_policy_state(policy, ckpt_path, device="cpu")
+        mpc_actor = _find_pypose_tv_actor(policy)
 
     td = env.reset()
     episode_stats = []
@@ -565,11 +573,20 @@ def main(cfg):
                 except Exception:
                     pass
 
-            td = policy(td)
-            try:
-                last_action_cmd = td.get(("agents", "action"), None)
-            except Exception:
-                last_action_cmd = None
+            if policy_control:
+                td = policy(td)
+                try:
+                    last_action_cmd = td.get(("agents", "action"), None)
+                except Exception:
+                    last_action_cmd = None
+            else:
+                try:
+                    zero_action = torch.zeros_like(td[("agents", "action")])
+                except Exception:
+                    shape = tuple(env.action_spec.shape)
+                    zero_action = torch.zeros(shape, device=base_env.device)
+                td.set(("agents", "action"), zero_action)
+                last_action_cmd = zero_action
             td = env.step(td)["next"]
 
             if render and video_path and render_interval > 0 and (t % render_interval) == 0:
