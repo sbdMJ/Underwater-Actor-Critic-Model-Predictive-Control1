@@ -8,7 +8,7 @@ from torchrl.data import UnboundedContinuousTensorSpec
 
 from marinegym.envs.single.hover_mpc import HoverMPC
 from marinegym.rewards.orbit_ppo import OrbitPPORewardCfg, compute_orbit_ppo_reward_terms
-from marinegym.utils.torch import quat_axis, euler_to_quaternion
+from marinegym.utils.torch import quat_axis, euler_to_quaternion, quat_rotate_inverse
 
 
 class OrbitCylinderMPC(HoverMPC):
@@ -49,7 +49,6 @@ class OrbitCylinderMPC(HoverMPC):
         self.flow_hybrid_prob = float(flow_cfg.get("hybrid_prob", 0.5))
         self.flow_tau = float(flow_cfg.get("tau", 0.0))
         self.flow_sigma = flow_cfg.get("sigma", getattr(self, "flow_velocity_gaussian_noise", 0.0))
-        self.flow_zero_vertical = bool(flow_cfg.get("zero_vertical", True))
         if getattr(self, "enable_flow", False):
             self._flow_sigma_tensor = torch.tensor(self.flow_sigma, device=self.device, dtype=torch.float32)
             self._flow_max_tensor = torch.tensor(self.max_flow_velocity, device=self.device, dtype=torch.float32)
@@ -859,9 +858,6 @@ class OrbitCylinderMPC(HoverMPC):
             noise = torch.randn_like(flow) * sigma * math.sqrt(dt)
             flow = flow + (-flow / tau) * dt + noise
             flow = torch.clamp(flow, min=-max_flow, max=max_flow)
-        if bool(getattr(self, "flow_zero_vertical", True)) and flow.shape[-1] >= 3:
-            flow = flow.clone()
-            flow[:, 2] = 0.0
         self.drone.flow_vels[:, 0, :] = flow
 
     def _pre_sim_step(self, tensordict):
@@ -915,6 +911,8 @@ class OrbitCylinderMPC(HoverMPC):
                 return
 
             center_env = self.cylinder_center.squeeze(0).expand(self.num_envs, 3)  # (num_envs, 3)
+            flow_w = self.drone.flow_vels[:, 0, 0:3]
+            flow_b = quat_rotate_inverse(self.drone.rot.squeeze(1), flow_w)
             cmds = self.controller.compute(
                 root_state,
                 center_w=center_env,
@@ -923,6 +921,7 @@ class OrbitCylinderMPC(HoverMPC):
                 v_tan=self.orbit_v_tan,
                 direction=self.orbit_direction,
                 yaw_offset=self.orbit_yaw_offset,
+                flow_b=flow_b,
             ).unsqueeze(1)
             tensordict.set(("agents", "action"), cmds)
             try:
