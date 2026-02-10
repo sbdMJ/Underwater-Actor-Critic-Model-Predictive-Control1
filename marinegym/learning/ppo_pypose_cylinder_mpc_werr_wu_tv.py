@@ -33,20 +33,20 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     """
 
     name: str = "ppo_pypose_cylinder_mpc_werr_wu_tv"
-    train_every: int = 32
-    ppo_epochs: int = 4
-    num_minibatches: int = 16
+    train_every: int = 64
+    ppo_epochs: int = 5
+    num_minibatches: int = 8
 
     priv_actor: bool = False
     priv_critic: bool = False
     checkpoint_path: Optional[str] = None
 
-    entropy_coef: float = 0.001
+    entropy_coef: float = 0.0001
     clip_param: float = 0.1
 
     actor_log_std_init: float = -1.0
     actor_log_std_min: float = -3.0
-    actor_log_std_max: float = 0.5
+    actor_log_std_max: float = 0.0
 
     # Observation layout hints (populated by scripts/train.py).
     obs_has_target_quat: bool = False
@@ -55,6 +55,7 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     obs_has_cylinder_rel: bool = False
 
     # PyPose MPC settings (populated by scripts/train.py / CLI).
+    mpc_dtype: str = "float32"
     mpc_dt: float = 0.05
     mpc_horizon: int = 5
     mpc_nu: int = 6
@@ -83,10 +84,14 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     # Learnable diagonal cost bounds.
     werr_lb: float = 1e-3
     werr_ub: float = 1e3
-    wu_lb: float = 1e-4
-    wu_ub: float = 1.0
+    wu_lb: float = 1e-3
+    wu_ub: float = 0.2
     weights_log_scale: bool = True
     cost_hidden: int = 256
+    R_min_coeff: float = 0.2
+    gamma_d_max: float = 5.0
+
+    critic_worstcase_k: int = 1
 
     # Optional init (populated by scripts/train.py).
     werr_init: Optional[List[float]] = None  # (10,)
@@ -130,6 +135,29 @@ def _map_raw_to_positive(raw: torch.Tensor, lb: float, ub: float, *, log_scale: 
         log_ub = math.log(ub)
         return torch.exp(log_lb + (log_ub - log_lb) * s)
     return lb + (ub - lb) * s
+
+
+def _parse_torch_dtype(dtype_str: str) -> torch.dtype:
+    s = str(dtype_str).strip().lower()
+    if s.startswith("torch."):
+        s = s[len("torch.") :]
+
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float": torch.float32,
+        "float64": torch.float64,
+        "fp64": torch.float64,
+        "double": torch.float64,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+    }
+    if s not in dtype_map:
+        raise ValueError(f"Unsupported cfg.mpc_dtype={dtype_str!r}. Use one of: {sorted(dtype_map.keys())}")
+    return dtype_map[s]
 
 
 def _load_uav_params(cfg: PPOPyposeCylinderMPCWErrWUTVConfig) -> dict:
@@ -245,8 +273,10 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         self.device = device
 
         uav_params = _load_uav_params(cfg)
+        mpc_dtype = _parse_torch_dtype(cfg.mpc_dtype)
         self.mpc = PyPoseCylinderOrbitMPCController(
             uav_params=uav_params,
+            mpc_dtype=mpc_dtype,
             dt=float(cfg.mpc_dt),
             horizon=int(cfg.mpc_horizon),
             batch_size=1,  # compute adapts on first call
@@ -267,14 +297,23 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         ).to(device)
         self.cost_map = _NeuralDiagCostMapOrbitErrHorizon(cfg, horizon=int(cfg.mpc_horizon), ne=self.ne, nu=self.nu).to(device)
 
+        hidden = int(cfg.cost_hidden)
+        self.actor_trunk = nn.Sequential(
+            nn.LazyLinear(hidden),
+            nn.ReLU(),
+            nn.LayerNorm(hidden),
+        )
+        self.actor_head = nn.Linear(hidden, 2)
+        # actor outputs:
+        #   actor_out[..., 0] -> raw R
+        #   actor_out[..., 1] -> raw disturbance gain gamma_d
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         obs = obs.squeeze(-2)
         batch_shape = obs.shape[:-1]
         obs_flat = obs.reshape(-1, obs.shape[-1])
-        if not torch.isfinite(obs_flat).all():
-            obs_flat = torch.nan_to_num(obs_flat)
+        obs_flat = torch.nan_to_num(obs_flat)
 
         rpos = obs_flat[:, 0:3]
         quat = normalize(obs_flat[:, 3:7])
@@ -286,7 +325,20 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         pos_rel = -rpos  # drone_pos - target_pos (target at origin)
         root_state = torch.cat([pos_rel, quat, vel_b], dim=-1)  # (B, 13)
 
+        actor_feat = self.actor_trunk(obs_flat)
+        actor_out = self.actor_head(actor_feat)
+        r_raw = actor_out[:, 0]
+        gamma_d_raw = actor_out[:, 1]
+
+        R_base = torch.exp(r_raw)
+        dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
+        orbit_err = torch.abs(dist_xy - float(self.cfg.orbit_radius))
+        R_min = float(self.cfg.R_min_coeff) * orbit_err
+        R = R_base + R_min
+        gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
+
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
+        w_u_seq = w_u_seq + R.view(-1, 1, 1)
 
         if bool(getattr(self.cfg, "obs_has_cylinder_rel", False)):
             center = obs_flat[:, -3:].to(dtype=root_state.dtype)  # cylinder_center - target_pos
@@ -303,11 +355,11 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
                 yaw_offset=float(self.cfg.orbit_yaw_offset),
                 w_err_seq=w_err_seq,
                 w_u_seq=w_u_seq,
+                gamma_d=gamma_d,
             )
         except Exception:
             u0 = torch.zeros((root_state.shape[0], self.nu), device=root_state.device, dtype=root_state.dtype)
-        if not torch.isfinite(u0).all():
-            u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
+        u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
 
         loc = u0.view(*batch_shape, 1, self.nu).to(dtype=obs.dtype)
 
@@ -461,6 +513,24 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
         b_values = tensordict["state_value"]
         b_returns = tensordict["ret"]
         values = self.critic(tensordict)["state_value"]
+
+        k = int(getattr(self.cfg, "critic_worstcase_k", 1))
+        if k > 1:
+            returns_flat = b_returns.view(-1)
+            values_flat = values.view(-1)
+            b_values_flat = b_values.view(-1)
+            B = returns_flat.shape[0] // k
+            if B > 0 and returns_flat.shape[0] % k == 0:
+                returns_reshaped = returns_flat.view(B, k)
+                worst_returns, _ = returns_reshaped.min(dim=1)
+                values = values_flat.view(B, k).mean(dim=1)
+                b_values = b_values_flat.view(B, k).mean(dim=1)
+                b_returns = worst_returns
+            else:
+                b_returns = b_returns.view(-1)
+                values = values_flat
+                b_values = b_values_flat
+
         values_clipped = b_values + (values - b_values).clamp(-self.clip_param, self.clip_param)
         value_loss_clipped = self.critic_loss_fn(b_returns, values_clipped)
         value_loss_original = self.critic_loss_fn(b_returns, values)

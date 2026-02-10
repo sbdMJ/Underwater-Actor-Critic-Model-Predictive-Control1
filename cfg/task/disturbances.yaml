@@ -1,11 +1,15 @@
 disturbances:
   train:
     flow:
-      enable_flow: false
+      enable_flow: true
       max_flow_velocity: [0.5, 0.5, 0.5, 0.0, 0.0, 0.0]
-      flow_velocity_gaussian_noise: [0.1, 0.1, 0.1, 0.0, 0.0, 0.0]
+      flow_velocity_gaussian_noise: [0.02, 0.02, 0.02, 0.0, 0.0, 0.0]
+      update_mode: ou
+      init_mode: uniform_signed
+      tau: 2.0
+      sigma: [0.03, 0.03, 0.03, 0.0, 0.0, 0.0]
     payload:
-      enable_payload: false
+      enable_payload: true
       mass: [0.01, 0.2]
       z: [-0.1, 0.1]
     

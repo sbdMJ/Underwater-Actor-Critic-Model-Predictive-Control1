@@ -15,11 +15,15 @@ env:
   env_spacing: ${task.env.env_spacing}
   max_episode_length: ${task.env.max_episode_length}
 
-total_frames: 3_000_000 #20_000_000
+total_frames: 40_000_000 #20_000_000
 max_iters: -1
 eval_interval: -1
 save_interval: -1
 seed: 0
+resume_ckpt: null
+resume_frames: null
+resume_iter: null
+save_resume_state: true
 
 # scripts/test_pypose_mpc.py overrides (Hydra strict mode friendly)
 mpc_test_steps: 5000
@@ -54,14 +58,22 @@ exp_log:
   save_csv: false
   plot: true
   plot_num_points: 200
+  flush_interval_steps: 0  # 0 disables periodic saving
+  flush_plot: false  # save plot on each flush
 
 wandb:
   group: ${oc.select:..task.name}
   run_name: ${oc.select:..task.name,test}-${oc.select:..algo.name,none}-${oc.select:..task.drone_model.name,none}
+  run_prefix: ""
+  # Optional: restrict which Hydra override keys appear in the run name.
+  # Example: [task.reward_orbit_r_max, task.reward_orbit_rp_max_deg]
+  name_keys: null
   job_type: train
-  entity: your_wandb_entity_here
+  # Set to your W&B username/team (or override with `wandb.entity=...`).
+  # If null, wandb uses your default entity from `wandb login`/`WANDB_ENTITY`.
+  entity: null
   project: marine_gym
-  mode: offline # set to 'offline' when debugging locally
+  mode: online # set to 'offline' when debugging locally
   run_id:
   monitor_gym: True
   tags:

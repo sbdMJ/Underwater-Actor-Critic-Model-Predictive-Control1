@@ -1,0 +1,6 @@
+mpc:
+  R_min_coeff: 0.5
+  gamma_d_max: 5.0
+
+algo:
+  critic_worstcase_k: 3

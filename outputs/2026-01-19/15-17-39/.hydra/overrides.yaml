@@ -1,6 +1,0 @@
-- task=OrbitCylinder_MPC
-- headless=false
-- enable_livestream=false
-- env.num_envs=1
-- +camera.head_offset=[0.4,0,0.15]
-- mode=evaluate

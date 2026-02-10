@@ -1,6 +1,0 @@
-- task=Hover_MPC
-- algo=ppo_acados_hover_mpc_qrdiag
-- task.use_internal_mpc=false
-- algo.learn_p=true
-- algo.px_ub=10
-- algo.pu_ub=10

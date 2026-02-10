@@ -79,6 +79,14 @@ class Hover(IsaacEnv):
             init_rpy_max,
         )
 
+        # Optional deterministic spawn / facing:
+        # - spawn_fixed_pos: [x,y,z] in env-local frame (meters). If set, resets always spawn at this pose.
+        # - spawn_face_point: [x,y,z] in env-local frame. If set, yaw is overwritten to face this point in XY.
+        #   Useful for orbit tasks to start with heading pointing at the cylinder center.
+        self.spawn_fixed_pos = cfg.task.get("spawn_fixed_pos", None)
+        self.spawn_face_point = cfg.task.get("spawn_face_point", None)
+        self.spawn_face_yaw_offset = float(cfg.task.get("spawn_face_yaw_offset", 0.0))
+
         target_rpy_min_cfg = cfg.task.get("target_rpy_min", None)
         target_rpy_max_cfg = cfg.task.get("target_rpy_max", None)
         if target_rpy_min_cfg is not None and target_rpy_max_cfg is not None:
@@ -312,8 +320,22 @@ class Hover(IsaacEnv):
             self.drone.set_flow_velocities(env_ids, self.max_flow_velocity, self.flow_velocity_gaussian_noise)
         self.drone._reset_idx(env_ids, self.training)
 
-        pos = self.init_pos_dist.sample((*env_ids.shape, 1))
+        num = int(env_ids.numel())
+        fixed_pos = getattr(self, "spawn_fixed_pos", None)
+        if fixed_pos is not None:
+            pos0 = torch.as_tensor(fixed_pos, device=self.device, dtype=self.init_pos_dist.low.dtype).view(1, 1, 3)
+            pos = pos0.expand(num, 1, 3)
+        else:
+            pos = self.init_pos_dist.sample((*env_ids.shape, 1))
         rpy = self.init_rpy_dist.sample((*env_ids.shape, 1))
+        face_point = getattr(self, "spawn_face_point", None)
+        if face_point is not None:
+            face0 = torch.as_tensor(face_point, device=self.device, dtype=pos.dtype).view(1, 1, 3)
+            face = face0.expand(num, 1, 3)
+            vec_xy = face[..., 0:2] - pos[..., 0:2]
+            yaw = torch.atan2(vec_xy[..., 1], vec_xy[..., 0]) + float(getattr(self, "spawn_face_yaw_offset", 0.0))
+            rpy = rpy.clone()
+            rpy[..., 2] = yaw
         rot_delta = euler_to_quaternion(rpy)
 
         # Optional model-specific rotation offset (in multiples of pi, like init_rpy_*).

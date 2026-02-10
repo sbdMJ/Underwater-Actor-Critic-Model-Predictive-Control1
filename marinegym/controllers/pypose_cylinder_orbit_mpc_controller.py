@@ -80,41 +80,41 @@ class _UAVParams:
 class _UnderwaterVehicleNLS(pp.module.NLS if _PYPOSE_AVAILABLE else object):
     """Same dynamics as `mpc_controller.py` / `pypose_mpc_controller.py` (Euler integration)."""
 
-    def __init__(self, dt: float, params: _UAVParams):
+    def __init__(self, dt: float, params: _UAVParams, *, dtype: torch.dtype):
         if not _PYPOSE_AVAILABLE:  # pragma: no cover
             raise ImportError("PyPose가 필요합니다.") from _PYPOSE_IMPORT_ERROR
         super().__init__()
         self.dt = float(dt)
         self.params = params
 
-        mass = torch.as_tensor(params.mass, dtype=torch.float64)
+        mass = torch.as_tensor(params.mass, dtype=dtype)
         I = torch.diag(
             torch.as_tensor(
                 [params.inertia_xx, params.inertia_yy, params.inertia_zz],
-                dtype=torch.float64,
+                dtype=dtype,
             )
         )
-        M_rb = torch.block_diag(mass * torch.eye(3, dtype=torch.float64), I)
-        A_added = torch.diag(params.added_mass.to(dtype=torch.float64))
+        M_rb = torch.block_diag(mass * torch.eye(3, dtype=dtype), I)
+        A_added = torch.diag(params.added_mass.to(dtype=dtype))
         self.register_buffer("M_inv", torch.linalg.inv(M_rb + A_added))
         self.register_buffer("A_added", A_added)
-        self.register_buffer("d_lin", params.linear_damping.to(dtype=torch.float64))
-        self.register_buffer("d_quad", params.quadratic_damping.to(dtype=torch.float64))
-        self.register_buffer("B_alloc", params.thruster_allocation.to(dtype=torch.float64))
+        self.register_buffer("d_lin", params.linear_damping.to(dtype=dtype))
+        self.register_buffer("d_quad", params.quadratic_damping.to(dtype=dtype))
+        self.register_buffer("B_alloc", params.thruster_allocation.to(dtype=dtype))
 
         buoyancy_force = float(params.rho) * float(params.g) * float(params.volume)
         self.buoyancy_force = buoyancy_force
         self.register_buffer(
             "_f_g_world",
-            torch.tensor([0.0, 0.0, -params.mass * params.g], dtype=torch.float64),
+            torch.tensor([0.0, 0.0, -params.mass * params.g], dtype=dtype),
         )
         self.register_buffer(
             "_f_b_world",
-            torch.tensor([0.0, 0.0, buoyancy_force], dtype=torch.float64),
+            torch.tensor([0.0, 0.0, buoyancy_force], dtype=dtype),
         )
         self.register_buffer(
             "_r_cb",
-            torch.tensor([0.0, 0.0, -params.coBM], dtype=torch.float64),
+            torch.tensor([0.0, 0.0, -params.coBM], dtype=dtype),
         )
 
     def state_transition(self, state: torch.Tensor, input: torch.Tensor, t=None) -> torch.Tensor:
@@ -256,6 +256,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self,
         *,
         uav_params: dict,
+        mpc_dtype: torch.dtype = torch.float32,
         dt: float = 0.05,
         horizon: int = 10,
         batch_size: int = 1,
@@ -294,6 +295,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self.ilqr_reg = float(ilqr_reg)
         self.terminal_weight_mult = float(terminal_weight_mult)
         self.max_thruster_force = float(max_thruster_force)
+        self.mpc_dtype = mpc_dtype
 
         hydro = uav_params["hydro_coef"]
         params = _UAVParams(
@@ -301,17 +303,17 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             inertia_xx=float(uav_params["inertia"]["xx"]),
             inertia_yy=float(uav_params["inertia"]["yy"]),
             inertia_zz=float(uav_params["inertia"]["zz"]),
-            added_mass=torch.as_tensor(hydro["added_mass"], dtype=torch.float64),
-            linear_damping=torch.as_tensor(hydro["linear_damping"], dtype=torch.float64),
-            quadratic_damping=torch.as_tensor(hydro["quadratic_damping"], dtype=torch.float64),
-            thruster_allocation=torch.as_tensor(B_np, dtype=torch.float64),
+            added_mass=torch.as_tensor(hydro["added_mass"], dtype=mpc_dtype),
+            linear_damping=torch.as_tensor(hydro["linear_damping"], dtype=mpc_dtype),
+            quadratic_damping=torch.as_tensor(hydro["quadratic_damping"], dtype=mpc_dtype),
+            thruster_allocation=torch.as_tensor(B_np, dtype=mpc_dtype),
             volume=float(uav_params.get("volume", 0.0)),
             coBM=float(uav_params.get("coBM", 0.0)),
             rho=float(uav_params.get("rho", 997.0)),
             g=float(uav_params.get("g", 9.81)),
             max_thruster_force=self.max_thruster_force,
         )
-        self.system = _UnderwaterVehicleNLS(self.dt, params)
+        self.system = _UnderwaterVehicleNLS(self.dt, params, dtype=mpc_dtype)
 
         w_err = torch.tensor(
             [
@@ -326,11 +328,11 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 float(q_wxy),
                 float(q_wxy),
             ],
-            dtype=torch.float64,
+            dtype=mpc_dtype,
         )
         # acados cost penalizes thruster *forces*; our decision variable is command in [-1,1]
         # => weight(cmd) = weight(force) * (max_thruster_force^2)
-        w_u = torch.tensor([float(r_u) * (self.max_thruster_force**2)] * nu, dtype=torch.float64)
+        w_u = torch.tensor([float(r_u) * (self.max_thruster_force**2)] * nu, dtype=mpc_dtype)
         self.register_buffer("_w_err", w_err)
         self.register_buffer("_w_u", w_u)
 
@@ -361,6 +363,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         u_init: torch.Tensor,
         w_err_seq: torch.Tensor | None = None,
         w_u_seq: torch.Tensor | None = None,
+        gamma_d: torch.Tensor | None = None,
+        x_meas_seq: torch.Tensor | None = None,
     ) -> torch.Tensor:
         try:
             from torch.func import jacrev, vmap  # type: ignore
@@ -424,31 +428,33 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 raise ValueError(f"w_u_seq must have shape ({B},{T},{nu}). got {tuple(w_u_seq.shape)}")
             w_u_seq = w_u_seq * float(self.max_thruster_force**2)
 
+        gamma_d_b = None
+        if gamma_d is not None:
+            gamma_d_b = torch.as_tensor(gamma_d, dtype=dtype, device=device).reshape(-1)
+            if gamma_d_b.numel() == 1 and B > 1:
+                gamma_d_b = gamma_d_b.expand(B)
+            if gamma_d_b.numel() != B:
+                raise ValueError(f"gamma_d must have shape ({B},) or scalar. got {tuple(gamma_d_b.shape)}")
+
         for _ in range(self.ilqr_iters):
             x_traj = self._rollout(x0, u)  # (B, T+1, nx)
+            if x_meas_seq is None:
+                x_meas_traj = x_traj
+            else:
+                x_meas_traj = x_meas_seq.to(device=device, dtype=dtype)
+                if x_meas_traj.shape != x_traj.shape:
+                    raise ValueError(f"x_meas_seq must have shape {tuple(x_traj.shape)}. got {tuple(x_meas_traj.shape)}")
 
-            # dynamics jacobians
-            A_list = []
-            B_list = []
-            for t in range(T):
-                xt = x_traj[:, t, :]
-                ut = u[:, t, :]
-                A_list.append(jac_x_b(xt, ut))
-                B_list.append(jac_u_b(xt, ut))
-            A = torch.stack(A_list, dim=1)  # (B, T, nx, nx)
-            Bu = torch.stack(B_list, dim=1)  # (B, T, nx, nu)
+            # dynamics jacobians (flatten (B,T) for fewer kernel launches)
+            x_flat = x_traj[:, :-1, :].reshape(B * T, self.nx)
+            u_flat = u.reshape(B * T, nu)
+            A = jac_x_b(x_flat, u_flat).view(B, T, self.nx, self.nx)
+            Bu = jac_u_b(x_flat, u_flat).view(B, T, self.nx, nu)
 
             # cost derivatives (Gauss-Newton for error terms)
-            e_list = []
-            Je_list = []
-            for t in range(T):
-                xt = x_traj[:, t, :]
-                et = e_b(xt, center_w)
-                Jet = jac_e_b(xt, center_w)  # (B, ne, nx)
-                e_list.append(et)
-                Je_list.append(Jet)
-            e_traj = torch.stack(e_list, dim=1)  # (B, T, ne)
-            Je_traj = torch.stack(Je_list, dim=1)  # (B, T, ne, nx)
+            c_flat = center_w.unsqueeze(1).expand(B, T, center_w.shape[-1]).reshape(B * T, center_w.shape[-1])
+            e_traj = e_b(x_flat, c_flat).view(B, T, self.ne)
+            Je_traj = jac_e_b(x_flat, c_flat).view(B, T, self.ne, self.nx)
 
             # terminal
             e_T = e_b(x_traj[:, -1, :], center_w)  # (B, ne)
@@ -471,6 +477,24 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             l_xx = torch.einsum("btex,bte,btey->btxy", Je_traj, w_err_b, Je_traj)
             l_u = w_u_b * u
             l_uu = torch.diag_embed(w_u_b)  # (B, T, nu, nu)
+            l_ux = torch.zeros(B, T, nu, self.nx, device=device, dtype=dtype)
+
+            if gamma_d_b is not None and x_meas_seq is not None:
+                dt = float(self.dt)
+                for t in range(T):
+                    x_next_pred = x_traj[:, t + 1, :]
+                    x_next_meas = x_meas_traj[:, t + 1, :]
+                    d_hat = (x_next_pred - x_next_meas)[:, :3] / dt
+                    weighted_d = gamma_d_b.view(B, 1) * d_hat
+
+                    Jx_pos = A[:, t, :3, :] / dt
+                    Ju_pos = Bu[:, t, :3, :] / dt
+
+                    l_x[:, t, :] = l_x[:, t, :] + torch.einsum("bix,bi->bx", Jx_pos, weighted_d)
+                    l_u[:, t, :] = l_u[:, t, :] + torch.einsum("biu,bi->bu", Ju_pos, weighted_d)
+                    l_xx[:, t, :, :] = l_xx[:, t, :, :] + torch.einsum("bix,biy->bxy", Jx_pos, Jx_pos) * gamma_d_b.view(B, 1, 1)
+                    l_uu[:, t, :, :] = l_uu[:, t, :, :] + torch.einsum("biu,biv->buv", Ju_pos, Ju_pos) * gamma_d_b.view(B, 1, 1)
+                    l_ux[:, t, :, :] = torch.einsum("biu,bix->bux", Ju_pos, Jx_pos) * gamma_d_b.view(B, 1, 1)
 
             # terminal derivatives
             if w_err_T.ndim == 1:
@@ -490,7 +514,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
                 Q_u = l_u[:, t, :] + torch.einsum("bik,bk->bi", Bt.transpose(-1, -2), V_x)
 
                 Q_xx = l_xx[:, t, :, :] + At.transpose(-1, -2) @ V_xx @ At
-                Q_ux = Bt.transpose(-1, -2) @ V_xx @ At
+                Q_ux = l_ux[:, t, :, :] + Bt.transpose(-1, -2) @ V_xx @ At
                 Q_uu = l_uu[:, t, :, :] + Bt.transpose(-1, -2) @ V_xx @ Bt
 
                 Q_uu_reg = Q_uu + self.ilqr_reg * Iu
@@ -540,6 +564,9 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         yaw_offset: float = 0.0,
         w_err_seq: torch.Tensor | None = None,
         w_u_seq: torch.Tensor | None = None,
+        gamma_d: torch.Tensor | None = None,
+        x_meas_seq: torch.Tensor | None = None,
+        skip_gamma_d_without_x_meas_seq: bool = True,
     ) -> torch.Tensor:
         x0 = root_state.reshape(-1, root_state.shape[-1])
         c = center_w.reshape(-1, center_w.shape[-1])
@@ -550,7 +577,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             self.batch_size = B
             self._u_warm = None
 
-        dtype = torch.float64
+        dtype = self.mpc_dtype
         device = x0.device
         x0d = x0.to(dtype=dtype)
         cd = c.to(dtype=dtype)
@@ -559,6 +586,10 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             u_init = torch.zeros(B, self.horizon, self.nu, dtype=dtype, device=device)
         else:
             u_init = self._u_warm.to(device=device, dtype=dtype)
+
+        gamma_d_eff = gamma_d
+        if skip_gamma_d_without_x_meas_seq and x_meas_seq is None:
+            gamma_d_eff = None
 
         u_traj = self._ilqr(
             x0d,
@@ -571,6 +602,8 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             u_init=u_init,
             w_err_seq=w_err_seq,
             w_u_seq=w_u_seq,
+            gamma_d=gamma_d_eff,
+            x_meas_seq=x_meas_seq,
         )
         self._u_warm = torch.cat([u_traj[:, 1:, :], torch.zeros_like(u_traj[:, :1, :])], dim=1).detach()
 

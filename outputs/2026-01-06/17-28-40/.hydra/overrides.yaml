@@ -1,5 +1,0 @@
-- task=Hover_MPC
-- task.drone_model.name=BlueROVHeavy
-- headless=false
-- enable_livestream=false
-- env.num_envs=1

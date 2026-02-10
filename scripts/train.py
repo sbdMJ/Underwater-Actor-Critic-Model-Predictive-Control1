@@ -2,10 +2,18 @@ import logging
 import os
 import time
 import json
+import re
 from pathlib import Path
+import sys
+
+# Ensure this repo's `marinegym/` is importable when running via `python scripts/train.py`.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import hydra
 import torch
+import torch.distributed as dist
 import numpy as np
 import pandas as pd
 import wandb
@@ -34,6 +42,8 @@ from setproctitle import setproctitle
 from torchrl.envs.transforms import TransformedEnv, InitTracker, Compose
 
 # ~/isaac410/python.sh scripts/train.py task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv task.use_internal_mpc=false headless=true enable_livestream=false env.num_envs=10
+# ~/isaac410/python.sh scripts/train.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1
+
 
 
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
@@ -44,12 +54,98 @@ def main(cfg):
     OmegaConf.register_new_resolver("eval", eval)
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_distributed = world_size > 1
+    is_rank0 = rank == 0
+
+    if is_distributed:
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl")
+
+        # Use per-process single GPU.
+        cfg.sim.device = f"cuda:{local_rank}"
+        if cfg.get("simulation_app", None) is None:
+            cfg.simulation_app = {}
+        cfg.simulation_app["active_gpu"] = int(local_rank)
+        cfg.simulation_app["physics_gpu"] = int(local_rank)
+        cfg.simulation_app["max_gpu_count"] = 1
+        cfg.simulation_app["multi_gpu"] = False
+
+        # Avoid port conflicts / redundant rendering.
+        if not is_rank0:
+            cfg.enable_livestream = False
+
+        ddp_env_mode = str(cfg.get("ddp_env_mode", "keep_total")).lower()
+        if ddp_env_mode in ("keep_total", "total"):
+            total_envs = int(cfg.env.num_envs)
+            if total_envs % world_size != 0:
+                raise ValueError(f"ddp_env_mode=keep_total requires env.num_envs divisible by WORLD_SIZE. got {total_envs=} {world_size=}")
+            per_rank_envs = total_envs // world_size
+            cfg.env.num_envs = per_rank_envs
+            try:
+                cfg.task.env.num_envs = per_rank_envs
+            except Exception:
+                pass
+
+        ddp_total_frames_mode = str(cfg.get("ddp_total_frames_mode", "global")).lower()
+        if ddp_total_frames_mode in ("global", "scale_down") and int(cfg.get("total_frames", -1)) > 0:
+            total_frames = int(cfg.total_frames)
+            if total_frames < world_size:
+                raise ValueError(f"ddp_total_frames_mode=global requires total_frames >= WORLD_SIZE. got {total_frames=} {world_size=}")
+            cfg.total_frames = total_frames // world_size
+
+    if str(cfg.task.name) == "OrbitCylinderMPC" and str(cfg.algo.name).lower() == "ppo":
+        cfg.task.control_mode = "direct"
+        cfg.task.use_internal_mpc = False
     simulation_app = init_simulation_app(cfg)
-    run = init_wandb(cfg)
-    setproctitle(run.name)
-    print(OmegaConf.to_yaml(cfg))
-    metrics_path = Path(run.dir) / "metrics.jsonl"
-    metrics_f = open(metrics_path, "a", encoding="utf-8")
+    run = None
+    run_dir = None
+    if (not is_distributed) or is_rank0:
+        run = init_wandb(cfg)
+        run_dir = run.dir
+        run_name = run.name
+    else:
+        run_name = None
+
+    if is_distributed:
+        obj_list = [run_dir, run_name]
+        dist.broadcast_object_list(obj_list, src=0, device=torch.device(f"cuda:{local_rank}"))
+        run_dir, run_name = obj_list
+
+    if run is None:
+        class _DummyRun:
+            def __init__(self, *, name: str, dir: str):
+                self.name = name
+                self.dir = dir
+
+            def log(self, *args, **kwargs):
+                pass
+
+            def log_artifact(self, *args, **kwargs):
+                pass
+
+        run = _DummyRun(name=str(run_name), dir=str(run_dir))
+
+    setproctitle(f"{run.name}-rank{rank}" if is_distributed else run.name)
+    if is_rank0:
+        print(OmegaConf.to_yaml(cfg))
+
+    metrics_f = None
+    if is_rank0:
+        metrics_path = Path(run.dir) / "metrics.jsonl"
+        metrics_f = open(metrics_path, "a", encoding="utf-8")
+    log_interval = int(cfg.get("log_interval", 50))
+    print_float_metrics = bool(cfg.get("print_float_metrics", False))
+    flush_interval_steps = int(cfg.get("flush_interval_steps", 0))
+    if flush_interval_steps <= 0:
+        try:
+            flush_interval_steps = int(cfg.get("exp_log", {}).get("flush_interval_steps", 0))
+        except Exception:
+            flush_interval_steps = 0
+    if flush_interval_steps <= 0:
+        flush_interval_steps = log_interval
 
     from marinegym.envs import IsaacEnv, register_tasks
     register_tasks()
@@ -73,16 +169,20 @@ def main(cfg):
         )
 
         alloc_dir = Path(run.dir) / algo_name
-        alloc_dir.mkdir(parents=True, exist_ok=True)
+        if is_rank0:
+            alloc_dir.mkdir(parents=True, exist_ok=True)
         alloc_path = alloc_dir / "thruster_allocation.npz"
 
         if not cfg.algo.get("mpc_alloc_npz", None):
-            thrust_axis = int(cfg.task.get("thrust_axis", 0))
-            B = compute_thruster_allocation_matrix_from_drone(
-                base_env.drone, thrust_axis=thrust_axis
-            )
-            np.savez(alloc_path, B=B, quat_order="wxyz")
             cfg.algo.mpc_alloc_npz = str(alloc_path)
+            if is_rank0:
+                thrust_axis = int(cfg.task.get("thrust_axis", 0))
+                B = compute_thruster_allocation_matrix_from_drone(
+                    base_env.drone, thrust_axis=thrust_axis
+                )
+                np.savez(alloc_path, B=B, quat_order="wxyz")
+        if is_distributed:
+            dist.barrier()
 
         if not cfg.algo.get("mpc_param_yaml", None):
             cfg.algo.mpc_param_yaml = base_env.drone.param_path
@@ -234,7 +334,7 @@ def main(cfg):
             orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
             if orbit_target_mode in ("auto", ""):
                 reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
-                if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+                if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
                     orbit_target_mode = "center"
                 else:
                     orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
@@ -244,7 +344,15 @@ def main(cfg):
                 center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
                 cfg.algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
 
-            cfg.algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+            if orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
+                logging.warning(
+                    "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
+                    "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."
+                )
+                include_cylinder_rel = True
+                cfg.task.include_cylinder_rel_in_obs = True
+            cfg.algo.obs_has_cylinder_rel = include_cylinder_rel
 
             if not cfg.algo.get("werr_init", None):
                 q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
@@ -289,10 +397,11 @@ def main(cfg):
                 cfg.algo.r_u_init = float(cfg.task.get("mpc_r_u", 0.02))
 
         # Keep W&B config in sync with runtime-updated fields (mpc_dt, mpc_alloc_npz, etc).
-        try:
-            run.config.update(OmegaConf.to_container(cfg, resolve=True), allow_val_change=True)
-        except Exception:
-            pass
+        if is_rank0:
+            try:
+                run.config.update(OmegaConf.to_container(cfg, resolve=True), allow_val_change=True)
+            except Exception:
+                pass
 
     transforms = [InitTracker()]
 
@@ -320,7 +429,7 @@ def main(cfg):
             raise NotImplementedError(f"Unknown action transform: {action_transform}")
 
     env = TransformedEnv(base_env, Compose(*transforms)).train()
-    env.set_seed(cfg.seed)
+    env.set_seed(int(cfg.seed) + rank if is_distributed else int(cfg.seed))
 
     try:
         policy = ALGOS[cfg.algo.name.lower()](
@@ -333,6 +442,120 @@ def main(cfg):
     except KeyError:
         raise NotImplementedError(f"Unknown algorithm: {cfg.algo.name}")
 
+    def _policy_state_dict() -> dict:
+        state_dict = policy.state_dict()
+        if not is_distributed:
+            return state_dict
+        stripped = {}
+        for k, v in state_dict.items():
+            if k.startswith("actor.module."):
+                k = "actor." + k[len("actor.module.") :]
+            elif k.startswith("critic.module."):
+                k = "critic." + k[len("critic.module.") :]
+            stripped[k] = v
+        return stripped
+
+    def _optimizer_state_dict() -> dict:
+        optim_state = {}
+        for name, value in vars(policy).items():
+            if isinstance(value, torch.optim.Optimizer):
+                optim_state[name] = value.state_dict()
+        return optim_state
+
+    def _maybe_load_optimizer_state(optim_state: dict):
+        if not isinstance(optim_state, dict):
+            return
+        for name, state in optim_state.items():
+            opt = getattr(policy, name, None)
+            if isinstance(opt, torch.optim.Optimizer):
+                try:
+                    opt.load_state_dict(state)
+                except Exception:
+                    pass
+
+    def _unwrap_policy_state(ckpt: dict) -> dict:
+        if not isinstance(ckpt, dict):
+            raise TypeError(f"Checkpoint is not a dict. type={type(ckpt)}")
+        for key in ("policy", "policy_state_dict", "state_dict", "model", "net"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                return ckpt[key]
+        if ckpt and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+            return ckpt
+        raise TypeError("Checkpoint does not contain a policy state_dict.")
+
+    def _load_resume_checkpoint(ckpt_path: Path):
+        payload = torch.load(str(ckpt_path), map_location=base_env.device)
+        policy_state = None
+        optim_state = None
+        collector_state = None
+        if isinstance(payload, dict):
+            try:
+                policy_state = _unwrap_policy_state(payload)
+            except TypeError:
+                policy_state = None
+            optim_state = payload.get("optimizers", None)
+            collector_state = payload.get("collector", None)
+
+        if optim_state is None or collector_state is None:
+            if ckpt_path.suffix == ".pt":
+                resume_path = ckpt_path.with_suffix(".resume.pt")
+                if resume_path.exists():
+                    resume_payload = torch.load(str(resume_path), map_location=base_env.device)
+                    if isinstance(resume_payload, dict):
+                        try:
+                            policy_state = _unwrap_policy_state(resume_payload) or policy_state
+                        except TypeError:
+                            pass
+                        optim_state = resume_payload.get("optimizers", optim_state)
+                        collector_state = resume_payload.get("collector", collector_state)
+
+        if policy_state is None:
+            raise TypeError("Checkpoint is missing a policy state_dict.")
+
+        return policy_state, optim_state, collector_state
+
+    resume_frames = int(cfg.get("resume_frames", 0) or 0)
+    resume_iter = int(cfg.get("resume_iter", -1) or -1)
+    resume_ckpt = cfg.get("resume_ckpt", None)
+    if resume_ckpt:
+        resume_path = Path(str(resume_ckpt)).expanduser()
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        policy_state, optim_state, collector_state = _load_resume_checkpoint(resume_path)
+        policy.load_state_dict(policy_state, strict=False)
+        _maybe_load_optimizer_state(optim_state or {})
+        if isinstance(collector_state, dict):
+            resume_frames = int(collector_state.get("frames", resume_frames))
+            resume_iter = int(collector_state.get("iter", resume_iter))
+        if resume_frames <= 0:
+            match = re.search(r"checkpoint_(\d+)\.pt$", str(resume_path))
+            if match:
+                resume_frames = int(match.group(1))
+
+    if is_distributed:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        ddp_find_unused_parameters = bool(cfg.get("ddp_find_unused_parameters", False))
+        try:
+            if hasattr(policy, "actor") and isinstance(getattr(policy, "actor"), torch.nn.Module):
+                policy.actor = DDP(
+                    policy.actor,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    broadcast_buffers=False,
+                    find_unused_parameters=ddp_find_unused_parameters,
+                )
+            if hasattr(policy, "critic") and isinstance(getattr(policy, "critic"), torch.nn.Module):
+                policy.critic = DDP(
+                    policy.critic,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    broadcast_buffers=False,
+                    find_unused_parameters=ddp_find_unused_parameters,
+                )
+        except Exception as e:
+            raise RuntimeError("Failed to wrap policy.actor/critic with DDP. Set ddp_find_unused_parameters=true if you suspect unused params.") from e
+
     frames_per_batch = env.num_envs * int(cfg.algo.train_every)
     total_frames = cfg.get("total_frames", -1) // frames_per_batch * frames_per_batch
     max_iters = cfg.get("max_iters", -1)
@@ -342,12 +565,20 @@ def main(cfg):
     # Save checkpoints by training progress.
     # Default: every 10% of training (override with `save_every_percent`; set <=0 to disable).
     save_every_percent = float(cfg.get("save_every_percent", 0.1))
+    best_metric_key = cfg.get("best_metric_key", "eval/return")
+    best_metric_mode = str(cfg.get("best_metric_mode", "max")).lower()
+    best_metric_value = float("-inf") if best_metric_mode != "min" else float("inf")
+    if best_metric_key in (None, "", "null"):
+        best_metric_key = None
+
+    if resume_iter < 0 and resume_frames > 0:
+        resume_iter = max(resume_frames // frames_per_batch - 1, -1)
 
     stats_keys = [
         k for k in base_env.observation_spec.keys(True, True)
         if isinstance(k, tuple) and k[0]=="stats"
     ]
-    episode_stats = EpisodeStats(stats_keys)
+    episode_stats = EpisodeStats(stats_keys) if is_rank0 else None
     collector = SyncDataCollector(
         env,
         policy=policy,
@@ -356,10 +587,27 @@ def main(cfg):
         device=cfg.sim.device,
         return_same_td=True,
     )
+    if resume_frames > 0:
+        collector._initial_frames = resume_frames
+    if resume_iter >= 0:
+        collector._initial_iter = resume_iter
 
     stop_file = cfg.get("stop_file", None)
     if stop_file is None:
         stop_file = str(Path(run.dir) / "STOP")
+
+    def _resume_state_for_checkpoint(step_iter: int, step_frames: int) -> dict:
+        return {
+            "policy": _policy_state_dict(),
+            "optimizers": _optimizer_state_dict(),
+            "collector": {
+                "frames": int(step_frames),
+                "iter": int(step_iter),
+            },
+            "meta": {
+                "time": time.time(),
+            },
+        }
 
     @torch.no_grad()
     def evaluate(
@@ -422,8 +670,9 @@ def main(cfg):
     # Without this, actions stay near 0 at init which can fall into the thruster deadzone.
     with set_exploration_type(ExplorationType.RANDOM):
         ckpt_dir = Path(run.dir) / "checkpoints"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        last_ckpt_frames = -1
+        if is_rank0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+        last_ckpt_frames = resume_frames if resume_frames > 0 else -1
         next_ckpt_target_frames = None
         next_ckpt_target_iter = None
 
@@ -436,9 +685,21 @@ def main(cfg):
                 next_ckpt_target_frames = _align(total_frames * save_every_percent)
             elif max_iters > 0:
                 next_ckpt_target_iter = max(1, int(max_iters * save_every_percent))
+            if resume_frames > 0 and next_ckpt_target_frames is not None:
+                while next_ckpt_target_frames is not None and resume_frames >= next_ckpt_target_frames:
+                    next_ckpt_target_frames = _align(next_ckpt_target_frames + total_frames * save_every_percent)
+                    if total_frames > 0 and next_ckpt_target_frames > total_frames:
+                        next_ckpt_target_frames = None
+            if resume_iter >= 0 and next_ckpt_target_iter is not None and max_iters > 0:
+                while next_ckpt_target_iter is not None and resume_iter >= next_ckpt_target_iter:
+                    next_ckpt_target_iter = int(next_ckpt_target_iter + max_iters * save_every_percent)
+                    if next_ckpt_target_iter >= max_iters:
+                        next_ckpt_target_iter = None
 
         def _maybe_save_checkpoint(force: bool = False):
             nonlocal last_ckpt_frames, next_ckpt_target_frames, next_ckpt_target_iter
+            if not is_rank0:
+                return
             if save_interval <= 0 and save_every_frames <= 0 and not force:
                 if save_every_percent <= 0:
                     return
@@ -460,7 +721,10 @@ def main(cfg):
                     return
             try:
                 ckpt_path = ckpt_dir / f"checkpoint_{collector._frames}.pt"
-                torch.save(policy.state_dict(), ckpt_path)
+                torch.save(_policy_state_dict(), ckpt_path)
+                if bool(cfg.get("save_resume_state", True)):
+                    resume_path = ckpt_path.with_suffix(".resume.pt")
+                    torch.save(_resume_state_for_checkpoint(i, collector._frames), resume_path)
                 last_ckpt_frames = int(collector._frames)
                 logging.info(f"Saved checkpoint to {str(ckpt_path)}")
 
@@ -482,41 +746,96 @@ def main(cfg):
             except AttributeError:
                 logging.warning(f"Policy {policy} does not implement `.state_dict()`")
 
-        pbar = tqdm(collector, total=total_frames//frames_per_batch)
+        def _maybe_save_best(info: dict, step_iter: int):
+            nonlocal best_metric_value
+            if not is_rank0 or best_metric_key is None:
+                return
+            metric_value = info.get(best_metric_key, None)
+            if metric_value is None:
+                return
+            if not isinstance(metric_value, (int, float)):
+                try:
+                    metric_value = float(metric_value)
+                except (TypeError, ValueError):
+                    return
+            improved = metric_value < best_metric_value if best_metric_mode == "min" else metric_value > best_metric_value
+            if not improved:
+                return
+            best_metric_value = metric_value
+            try:
+                ckpt_path = Path(run.dir) / "checkpoint_best.pt"
+                ckpt_dir_best = ckpt_dir / "checkpoint_best.pt"
+                torch.save(_policy_state_dict(), ckpt_path)
+                try:
+                    torch.save(_policy_state_dict(), ckpt_dir_best)
+                except Exception:
+                    pass
+                if bool(cfg.get("save_resume_state", True)):
+                    resume_path = ckpt_path.with_suffix(".resume.pt")
+                    torch.save(_resume_state_for_checkpoint(step_iter, collector._frames), resume_path)
+                    try:
+                        torch.save(
+                            _resume_state_for_checkpoint(step_iter, collector._frames),
+                            ckpt_dir_best.with_suffix(".resume.pt"),
+                        )
+                    except Exception:
+                        pass
+                logging.info(
+                    "Saved best checkpoint to %s (metric=%s value=%.6f)",
+                    str(ckpt_path),
+                    best_metric_key,
+                    metric_value,
+                )
+            except AttributeError:
+                logging.warning(f"Policy {policy} does not implement `.state_dict()`")
+
+        initial_steps = resume_frames // frames_per_batch if resume_frames > 0 else 0
+        start_iter = resume_iter + 1 if resume_iter >= 0 else 0
+        pbar = tqdm(
+            collector,
+            total=total_frames // frames_per_batch,
+            initial=initial_steps,
+            disable=not is_rank0,
+        )
         env.train()
-        for i, data in enumerate(pbar):
+        last_iter = start_iter - 1
+        for i, data in enumerate(pbar, start=start_iter):
+            last_iter = i
             if os.path.exists(stop_file):
                 logging.info(f"Stop file detected: {stop_file}")
                 break
-            info = {"env_frames": collector._frames, "rollout_fps": collector._fps}
-            episode_stats.add(data.to_tensordict())
-
-            if len(episode_stats) >= base_env.num_envs:
-                stats = {
-                    "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
-                    for k, v in episode_stats.pop().items(True, True)
-                }
-                info.update(stats)
+            info = {"env_frames": collector._frames, "rollout_fps": collector._fps, "iter": i}
+            if episode_stats is not None:
+                episode_stats.add(data.to_tensordict())
+                if len(episode_stats) > 0:
+                    ep_stats = episode_stats.pop()
+                    info["train/episodes"] = int(ep_stats.shape[0])
+                    stats = {
+                        "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
+                        for k, v in ep_stats.items(True, True)
+                    }
+                    info.update(stats)
 
             info.update(policy.train_op(data.to_tensordict()))
             # Action diagnostics (helps catch thruster deadzone / saturation).
-            try:
-                actions = None
-                for k in (("agents", "action"), "action", ("action",), ("collector", "action")):
-                    try:
-                        actions = data.get(k)
-                        break
-                    except Exception:
-                        actions = None
-                if actions is None:
-                    raise KeyError("action key not found")
-                info["train/action_abs_mean"] = actions.abs().mean().item()
-                # Thruster model has a real deadzone around ~0.075; we also track a wider "low action" band.
-                info["train/action_deadzone_frac"] = (actions.abs() < 0.08).float().mean().item()
-                info["train/action_low_frac"] = (actions.abs() < 0.2).float().mean().item()
-                info["train/action_sat_frac"] = (actions.abs() > 0.99).float().mean().item()
-            except Exception:
-                pass
+            if is_rank0 and log_interval > 0 and i % log_interval == 0:
+                try:
+                    actions = None
+                    for k in (("agents", "action"), "action", ("action",), ("collector", "action")):
+                        try:
+                            actions = data.get(k)
+                            break
+                        except Exception:
+                            actions = None
+                    if actions is None:
+                        raise KeyError("action key not found")
+                    info["train/action_abs_mean"] = actions.abs().mean().item()
+                    # Thruster model has a real deadzone around ~0.075; we also track a wider "low action" band.
+                    info["train/action_deadzone_frac"] = (actions.abs() < 0.08).float().mean().item()
+                    info["train/action_low_frac"] = (actions.abs() < 0.2).float().mean().item()
+                    info["train/action_sat_frac"] = (actions.abs() > 0.99).float().mean().item()
+                except Exception:
+                    pass
             # MPC solver diagnostics (acados failures often look like "robot doesn't move").
             if algo_name in ("ac_mpc", "ac_mpc_pypose"):
                 try:
@@ -541,66 +860,88 @@ def main(cfg):
                 except Exception:
                     pass
 
-            if eval_interval > 0 and i % eval_interval == 0:
+            if is_rank0 and eval_interval > 0 and i % eval_interval == 0:
                 logging.info(f"Eval at {collector._frames} steps.")
                 info.update(evaluate())
                 env.train()
                 base_env.train()
 
             _maybe_save_checkpoint()
+            _maybe_save_best(info, i)
 
-            run.log(info)
-            print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, float)}))
-            try:
-                payload = {k: v for k, v in info.items() if isinstance(v, (int, float))}
-                metrics_f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                metrics_f.flush()
-            except Exception:
-                pass
+            if is_rank0:
+                run.log(info, step=i)
+                if print_float_metrics and log_interval > 0 and i % log_interval == 0:
+                    print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, float)}))
+                if metrics_f is not None:
+                    try:
+                        payload = {k: v for k, v in info.items() if isinstance(v, (int, float))}
+                        metrics_f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                        if flush_interval_steps > 0 and i % flush_interval_steps == 0:
+                            metrics_f.flush()
+                    except Exception:
+                        pass
 
-            pbar.set_postfix({"rollout_fps": collector._fps, "frames": collector._frames})
+                pbar.set_postfix({"rollout_fps": collector._fps, "frames": collector._frames})
 
             if max_iters > 0 and i >= max_iters - 1:
                 break
 
-    logging.info(f"Final Eval at {collector._frames} steps.")
-    info = {"env_frames": collector._frames}
-    # info.update(evaluate())
-    # run.log(info)
+    if is_rank0:
+        logging.info(f"Final Eval at {collector._frames} steps.")
+        info = {"env_frames": collector._frames}
+        # info.update(evaluate())
+        # run.log(info)
 
-    try:
-        ckpt_dir = Path(run.dir) / "checkpoints"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_path = str(Path(run.dir) / "checkpoint_final.pt")
-        ckpt_path_copy = str(ckpt_dir / "checkpoint_final.pt")
-        torch.save(policy.state_dict(), ckpt_path)
-        # Convenience copy alongside intermediate checkpoints.
         try:
-            torch.save(policy.state_dict(), ckpt_path_copy)
+            ckpt_dir = Path(run.dir) / "checkpoints"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = str(Path(run.dir) / "checkpoint_final.pt")
+            ckpt_path_copy = str(ckpt_dir / "checkpoint_final.pt")
+            torch.save(_policy_state_dict(), ckpt_path)
+            # Convenience copy alongside intermediate checkpoints.
+            try:
+                torch.save(_policy_state_dict(), ckpt_path_copy)
+            except Exception:
+                pass
+            if bool(cfg.get("save_resume_state", True)):
+                resume_path = str(Path(run.dir) / "checkpoint_final.resume.pt")
+                torch.save(_resume_state_for_checkpoint(last_iter, collector._frames), resume_path)
+                try:
+                    torch.save(
+                        _resume_state_for_checkpoint(last_iter, collector._frames),
+                        str(ckpt_dir / "checkpoint_final.resume.pt"),
+                    )
+                except Exception:
+                    pass
+
+            model_artifact = wandb.Artifact(
+                f"{cfg.task.name}-{cfg.algo.name.lower()}-{cfg.task.drone_model.name}",
+                type="model",
+                description=f"{cfg.task.name}-{cfg.algo.name.lower()}",
+                metadata=dict(cfg))
+
+            model_artifact.add_file(ckpt_path)
+            wandb.save(ckpt_path)
+            run.log_artifact(model_artifact)
+
+            logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+        except AttributeError:
+            logging.warning(f"Policy {policy} does not implement `.state_dict()`")
+
+        wandb.finish()
+        try:
+            if metrics_f is not None:
+                metrics_f.close()
         except Exception:
             pass
 
-        model_artifact = wandb.Artifact(
-            f"{cfg.task.name}-{cfg.algo.name.lower()}-{cfg.task.drone_model.name}",
-            type="model",
-            description=f"{cfg.task.name}-{cfg.algo.name.lower()}",
-            metadata=dict(cfg))
-
-        model_artifact.add_file(ckpt_path)
-        wandb.save(ckpt_path)
-        run.log_artifact(model_artifact)
-
-        logging.info(f"Saved checkpoint to {str(ckpt_path)}")
-    except AttributeError:
-        logging.warning(f"Policy {policy} does not implement `.state_dict()`")
-
-    wandb.finish()
-    try:
-        metrics_f.close()
-    except Exception:
-        pass
-
     simulation_app.close()
+    if is_distributed:
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

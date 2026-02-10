@@ -1,4 +1,5 @@
 import os
+import sys
 
 import torch
 from tensordict import TensorDict
@@ -16,23 +17,38 @@ def init_simulation_app(cfg):
     # launch the simulator
     # config = {"headless": cfg["headless"], "anti_aliasing": 1}
     config = {
-    "headless": cfg["headless"],
-    "enable_livestream": cfg["enable_livestream"],
-    "anti_aliasing": 1,
-    "width": 1280,
-    "height": 720,
-    "window_width": 1920,
-    "window_height": 1080,
-    "renderer": "RayTracedLighting",
-    "display_options": 3286,  # Set display options to show default grid
-}
+        "headless": cfg["headless"],
+        "enable_livestream": cfg["enable_livestream"],
+        "anti_aliasing": 1,
+        "width": 1280,
+        "height": 720,
+        "window_width": 1920,
+        "window_height": 1080,
+        "renderer": "RayTracedLighting",
+        "display_options": 3286,  # Set display options to show default grid
+    }
+    try:
+        from omegaconf import OmegaConf
+
+        sim_app_cfg = cfg.get("simulation_app", None)
+        if sim_app_cfg is not None:
+            sim_app_cfg = OmegaConf.to_container(sim_app_cfg, resolve=True)
+            if isinstance(sim_app_cfg, dict):
+                config.update({k: v for k, v in sim_app_cfg.items() if v is not None})
+    except Exception:
+        pass
     # load cheaper kit config in headless
     # if cfg.headless:
     #     app_experience = f"{os.environ['EXP_PATH']}/omni.isaac.sim.python.gym.headless.kit"
     # else:
     #     app_experience = f"{os.environ['EXP_PATH']}/omni.isaac.sim.python.kit"
     app_experience = f"{os.environ['EXP_PATH']}/omni.isaac.sim.python.kit"
-    simulation_app = SimulationApp(config, experience=app_experience)
+    original_argv = list(sys.argv)
+    try:
+        sys.argv = [sys.argv[0]]
+        simulation_app = SimulationApp(config, experience=app_experience)
+    finally:
+        sys.argv = original_argv
     
     if config['enable_livestream']:
         from omni.isaac.core.utils.extensions import enable_extension

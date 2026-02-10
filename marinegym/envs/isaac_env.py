@@ -82,6 +82,19 @@ class IsaacEnv(EnvBase):
     REGISTRY: Dict[str, Type["IsaacEnv"]] = {}
 
     def __init__(self, cfg, headless):
+        def _to_bool(x) -> bool:
+            if isinstance(x, bool):
+                return x
+            if isinstance(x, (int, float)):
+                return bool(x)
+            if isinstance(x, str):
+                s = x.strip().lower()
+                if s in ("true", "1", "yes", "y", "t"):
+                    return True
+                if s in ("false", "0", "no", "n", "f", ""):
+                    return False
+            return bool(x)
+
         device = str(cfg.sim.device)
         if device == "gpu" or device.startswith("gpu:"):
             device = "cuda" + device[3:]
@@ -89,7 +102,12 @@ class IsaacEnv(EnvBase):
         super().__init__(device=device, batch_size=[cfg.env.num_envs], run_type_checks=False)
         # store inputs to class
         self.cfg = cfg
-        self.enable_render((not headless) or (headless & cfg['enable_livestream']))
+        headless_b = _to_bool(headless)
+        try:
+            enable_livestream = cfg.get("enable_livestream", False)
+        except Exception:
+            enable_livestream = cfg["enable_livestream"] if "enable_livestream" in cfg else False
+        self.enable_render((not headless_b) or (headless_b and _to_bool(enable_livestream)))
         self.enable_viewport = True
         # extract commonly used parameters
         self.num_envs = self.cfg.env.num_envs

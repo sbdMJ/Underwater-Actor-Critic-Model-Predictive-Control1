@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -15,10 +16,32 @@ from marinegym.learning import ALGOS  # noqa: F401  (Hydra ConfigStore 등록용
 # ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=Hover_PyPose_MPC algo=ppo_pypose_mpc_qrdiag_tv task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/home/mjkim/MarineGym/wandb/offline-run-20260121_150344-p0j9ggir/files/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200 mode=evaluate
 # ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_mpc_qrdiag_tv +task.use_internal_mpc=false   headless=false enable_livestream=false env.num_envs=1   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000
 
+# ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv task.reward_mode=orbit_cost task.orbit_target_mode=auto task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false headless=false enable_livestream=false env.num_envs=1 mode=evaluate +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000 +eval.print_every=200 +eval.print_weights_every=200 +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
 
 
 FILE_PATH = os.path.dirname(__file__)
 os.environ.setdefault("MARINEGYM_ROOT", str(Path(__file__).resolve().parents[1]))
+logger = logging.getLogger(__name__)
+
+
+def _get_launch_cwd() -> Path:
+    """Return the directory where the Hydra job was launched from (not the run dir)."""
+    try:
+        from hydra.utils import get_original_cwd  # noqa: WPS433
+
+        return Path(get_original_cwd())
+    except Exception:
+        return Path.cwd()
+
+
+def _to_numpy(x):
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
 
 
 def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Path):
@@ -99,7 +122,7 @@ def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Pat
         orbit_target_mode = str(cfg.task.get("orbit_target_mode", "auto")).lower()
         if orbit_target_mode in ("auto", ""):
             reward_mode = str(cfg.task.get("reward_mode", "hover")).lower()
-            if reward_mode in ("orbit_cost", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
+            if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit"):
                 orbit_target_mode = "center"
             else:
                 orbit_target_mode = "waypoint" if not bool(cfg.task.get("use_internal_mpc", True)) else "center"
@@ -109,7 +132,15 @@ def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Pat
             center_cfg = cfg.task.get("cylinder_center", [0.0, 0.0, 0.0])
             algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
 
-        algo.obs_has_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+        include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
+        if orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
+            logger.warning(
+                "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
+                "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."
+            )
+            include_cylinder_rel = True
+            cfg.task.include_cylinder_rel_in_obs = True
+        algo.obs_has_cylinder_rel = include_cylinder_rel
 
         if not algo.get("werr_init", None):
             q_radial = float(cfg.task.get("mpc_q_radial", 50.0))
@@ -270,12 +301,30 @@ def main(cfg):
 
         ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1 mode=evaluate   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200   +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
 
+    Trajectory logging (default on when mode=evaluate):
+      - Saves `trajectory.npz` under Hydra's run dir (./outputs/...).
+      - Saves plots by default:
+          - `trajectory.png`         (|v_tan - v_tan_ref| colormap if available; else speed)
+          - `trajectory_energy.png`  (energy proxy colormap, E = Σ|u_i|^3, if available)
+          - `trajectory_energy_polar.png` (polar plot: orbit angle vs instantaneous power proxy, P_total = Σ|u_i|^3)
+      - Disable with `+eval.save_traj=false`.
+      - Override paths with `+eval.traj_path=/tmp/trajectory.npz +eval.traj_png_path=/tmp/trajectory.png`.
+      - Override trajectory colormap key with `+eval.traj_color_key=speed` (or `v_tan_err`, `v_tan`, `energy`, ...).
+      - Re-visualize later: `python scripts/visualize_trajectory.py /path/to/trajectory.npz`
+
     """
     OmegaConf.register_new_resolver("eval", eval)
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
 
+    # OrbitCylinderMPC: ensure we evaluate the *policy* (direct thruster actions),
+    # not the env's internal MPC override (which is enabled when control_mode=mpc).
+    if str(getattr(cfg, "task", {}).get("name", "")) == "OrbitCylinderMPC":
+        cfg.task.control_mode = "direct"
+        cfg.task.use_internal_mpc = False
+
     eval_cfg = cfg.get("eval", {}) or {}
+    mode = str(cfg.get("mode", "")).lower()
     ckpt = eval_cfg.get("ckpt", None)
     if not ckpt:
         ckpt = str(Path.cwd() / "checkpoints" / "checkpoint_final.pt")
@@ -290,6 +339,46 @@ def main(cfg):
     render = bool(eval_cfg.get("render", not cfg.headless))
     render_interval = int(eval_cfg.get("render_interval", 2))
     video_path = str(eval_cfg.get("video_path", "") or "")
+
+    save_traj = eval_cfg.get("save_traj", None)
+    if save_traj is None:
+        save_traj = mode == "evaluate"
+    save_traj = bool(save_traj)
+    traj_env_id = int(eval_cfg.get("traj_env_id", 0))
+    traj_stride = max(1, int(eval_cfg.get("traj_stride", 1)))
+    traj_out = eval_cfg.get("traj_path", None)
+    traj_path = Path(str(traj_out)).expanduser() if traj_out else Path("trajectory.npz")
+    if not traj_path.is_absolute():
+        traj_path = _get_launch_cwd() / traj_path
+
+    traj_png_out = eval_cfg.get("traj_png_path", None)
+    traj_png_path = Path(str(traj_png_out)).expanduser() if traj_png_out else traj_path.with_suffix(".png")
+    if not traj_png_path.is_absolute():
+        traj_png_path = _get_launch_cwd() / traj_png_path
+    plot_energy = bool(eval_cfg.get("plot_energy", eval_cfg.get("plot_traj_energy", True)))
+    traj_energy_png_out = eval_cfg.get("traj_energy_png_path", None)
+    traj_energy_png_path = (
+        Path(str(traj_energy_png_out)).expanduser()
+        if traj_energy_png_out
+        else traj_png_path.with_name(traj_png_path.stem + "_energy" + traj_png_path.suffix)
+    )
+    if not traj_energy_png_path.is_absolute():
+        traj_energy_png_path = _get_launch_cwd() / traj_energy_png_path
+    plot_energy_polar = bool(eval_cfg.get("plot_energy_polar", eval_cfg.get("plot_polar_energy", True)))
+    traj_energy_polar_png_out = eval_cfg.get("traj_energy_polar_png_path", None)
+    traj_energy_polar_png_path = (
+        Path(str(traj_energy_polar_png_out)).expanduser()
+        if traj_energy_polar_png_out
+        else traj_png_path.with_name(traj_png_path.stem + "_energy_polar" + traj_png_path.suffix)
+    )
+    if not traj_energy_polar_png_path.is_absolute():
+        traj_energy_polar_png_path = _get_launch_cwd() / traj_energy_polar_png_path
+    energy_polar_bin_deg = float(eval_cfg.get("energy_polar_bin_deg", 5.0))
+    energy_polar_show_raw = bool(eval_cfg.get("energy_polar_show_raw", False))
+    plot_traj = bool(eval_cfg.get("plot_traj", True))
+    plot_heading_stride = int(eval_cfg.get("plot_heading_stride", 50))
+    plot_arrow_len = float(eval_cfg.get("plot_arrow_len", 0.25))
+    plot_show = bool(eval_cfg.get("plot_show", False))
 
     simulation_app = init_simulation_app(cfg)
 
@@ -321,6 +410,136 @@ def main(cfg):
     episode_stats = []
     frames = []
 
+    pos_log = []
+    heading_log = []
+    speed_log = []
+    vtan_log = []
+    vtan_err_log = []
+    u_log = []
+    energy_log = []
+    flow_log = []
+    done_log = []
+    step_log = []
+
+    traj_nu = int(getattr(base_env.drone, "num_rotors", 0) or 0)
+    if traj_nu <= 0:
+        try:
+            traj_nu = int(getattr(base_env.drone.action_spec, "shape", (0,))[-1])
+        except Exception:
+            traj_nu = 0
+
+    # Reference tangential speed (used for v_tan_err colormap).
+    v_tan_ref = float("nan")
+    try:
+        v_tan_ref = float(cfg.task.get("reward_orbit_v_tan_ref", float("nan")))
+    except Exception:
+        v_tan_ref = float("nan")
+    if not np.isfinite(v_tan_ref):
+        try:
+            v_tan_ref = float(getattr(base_env, "orbit_v_tan", float("nan")))
+        except Exception:
+            v_tan_ref = float("nan")
+
+    last_action_cmd = None
+
+    def _maybe_log_traj(*, step: int, done: bool) -> None:
+        if not save_traj:
+            return
+        if (int(step) % int(traj_stride)) != 0:
+            return
+        try:
+            base_env.drone.get_state()
+            pos_np = _to_numpy(base_env.drone.pos[traj_env_id, 0, :]).astype(np.float32, copy=False)
+            pos_log.append(pos_np)
+            heading_log.append(_to_numpy(base_env.drone.heading[traj_env_id, 0, :]).astype(np.float32, copy=False))
+            vel_lin_w = None
+            try:
+                vel_lin_w = base_env.drone.vel_w[traj_env_id, 0, 0:3]
+                speed_log.append(float(torch.linalg.norm(vel_lin_w).item()))
+            except Exception:
+                speed_log.append(float("nan"))
+
+            # Tangential speed around the cylinder (signed along desired orbit direction).
+            v_tan = float("nan")
+            v_tan_err = float("nan")
+            try:
+                if vel_lin_w is not None and hasattr(base_env, "cylinder_center"):
+                    center_t = getattr(base_env, "cylinder_center", None)
+                    center_np = (
+                        np.asarray(_to_numpy(center_t), dtype=np.float32).reshape(-1)[:3]
+                        if center_t is not None
+                        else np.zeros((3,), dtype=np.float32)
+                    )
+                    rel_xy = pos_np[0:2] - center_np[0:2]  # center -> robot (XY)
+                    dist = float(np.linalg.norm(rel_xy))
+                    if np.isfinite(dist) and dist > 1e-6:
+                        radial_hat_xy = rel_xy / dist
+                        dir_sign = float(getattr(base_env, "orbit_direction", 1.0))
+                        dir_sign = 1.0 if dir_sign >= 0.0 else -1.0
+                        tan_hat_xy = np.asarray([-radial_hat_xy[1], radial_hat_xy[0]], dtype=np.float32) * dir_sign
+                        v_xy = np.asarray(_to_numpy(vel_lin_w[0:2]), dtype=np.float32).reshape(2,)
+                        v_tan = float(tan_hat_xy[0] * v_xy[0] + tan_hat_xy[1] * v_xy[1])
+                        if np.isfinite(v_tan_ref):
+                            v_tan_err = float(abs(v_tan - float(v_tan_ref)))
+            except Exception:
+                v_tan = float("nan")
+                v_tan_err = float("nan")
+            vtan_log.append(float(v_tan))
+            vtan_err_log.append(float(v_tan_err))
+
+            try:
+                flow = base_env.drone.flow_vels[traj_env_id, 0, 0:3]
+                flow_log.append(_to_numpy(flow).astype(np.float32, copy=False))
+            except Exception:
+                flow_log.append(np.full((3,), np.nan, dtype=np.float32))
+
+            u_cmd = getattr(base_env.drone, "throttle", None)
+            if u_cmd is None:
+                u_cmd = last_action_cmd
+            u_vec = None
+            energy = float("nan")
+            if u_cmd is not None:
+                try:
+                    if torch.is_tensor(u_cmd):
+                        u_t = u_cmd
+                        if u_t.ndim >= 3:
+                            u_t = u_t.squeeze(1)
+                        u_env = u_t[int(traj_env_id)]
+                        u_vec = u_env.detach().cpu().to(dtype=torch.float32).numpy()
+                        energy = float((u_env.abs() ** 3).sum().item())
+                    else:
+                        u_np = np.asarray(u_cmd)
+                        if u_np.ndim >= 3:
+                            u_np = np.squeeze(u_np, axis=1)
+                        u_env = np.asarray(u_np[int(traj_env_id)], dtype=np.float32)
+                        u_vec = u_env
+                        energy = float(np.sum(np.abs(u_env) ** 3))
+                except Exception:
+                    u_vec = None
+                    energy = float("nan")
+            if u_vec is None:
+                if traj_nu > 0:
+                    u_vec = np.full((traj_nu,), np.nan, dtype=np.float32)
+                else:
+                    u_vec = np.zeros((0,), dtype=np.float32)
+            try:
+                u_vec = np.asarray(u_vec, dtype=np.float32).reshape(-1)
+                if traj_nu > 0 and u_vec.shape[0] != traj_nu:
+                    if u_vec.shape[0] > traj_nu:
+                        u_vec = u_vec[:traj_nu]
+                    else:
+                        u_vec = np.pad(u_vec, (0, traj_nu - u_vec.shape[0]), constant_values=np.nan)
+            except Exception:
+                u_vec = np.full((traj_nu,), np.nan, dtype=np.float32) if traj_nu > 0 else np.zeros((0,), dtype=np.float32)
+            u_log.append(u_vec)
+            energy_log.append(float(energy))
+            done_log.append(bool(done))
+            step_log.append(int(step))
+        except Exception:
+            return
+
+    _maybe_log_traj(step=0, done=False)
+
     with set_exploration_type(ExplorationType.MODE):
         for t in range(steps):
             if print_every > 0 and t % print_every == 0:
@@ -347,6 +566,10 @@ def main(cfg):
                     pass
 
             td = policy(td)
+            try:
+                last_action_cmd = td.get(("agents", "action"), None)
+            except Exception:
+                last_action_cmd = None
             td = env.step(td)["next"]
 
             if render and video_path and render_interval > 0 and (t % render_interval) == 0:
@@ -356,6 +579,15 @@ def main(cfg):
                     pass
 
             done = td.get("done", None)
+            done_val = False
+            if done is not None:
+                try:
+                    done_mask_for_traj = done.squeeze(-1)
+                    done_val = bool(done_mask_for_traj[traj_env_id].item())
+                except Exception:
+                    done_val = False
+            _maybe_log_traj(step=t + 1, done=done_val)
+
             if done is not None and bool(done.any()):
                 done_mask = done.squeeze(-1)
                 try:
@@ -366,6 +598,7 @@ def main(cfg):
 
                 td.set("_reset", done_mask)
                 td = env.reset(td)
+                _maybe_log_traj(step=t + 1, done=False)
 
             if not bool(cfg.headless):
                 env.render()
@@ -386,6 +619,126 @@ def main(cfg):
             print(f"[eval] saved video: {video_path}")
         except Exception as e:
             print(f"[eval] failed to save video (install torchvision or disable eval.video_path): {e}")
+
+    if save_traj and pos_log:
+        try:
+            pos_arr = np.stack(pos_log, axis=0).astype(np.float32, copy=False)
+            heading_arr = np.stack(heading_log, axis=0).astype(np.float32, copy=False)
+            speed_arr = np.asarray(speed_log, dtype=np.float32)
+            vtan_arr = np.asarray(vtan_log, dtype=np.float32)
+            vtan_err_arr = np.asarray(vtan_err_log, dtype=np.float32)
+            u_arr = np.stack(u_log, axis=0).astype(np.float32, copy=False) if u_log else np.zeros((0, 0), dtype=np.float32)
+            energy_arr = np.asarray(energy_log, dtype=np.float32)
+            energy_total = float(np.nansum(energy_arr))
+            flow_arr = np.stack(flow_log, axis=0).astype(np.float32, copy=False) if flow_log else np.zeros((0, 3), dtype=np.float32)
+            done_arr = np.asarray(done_log, dtype=np.bool_)
+            step_arr = np.asarray(step_log, dtype=np.int64)
+
+            if flow_arr.shape[0] != pos_arr.shape[0]:
+                if flow_arr.shape[0] > pos_arr.shape[0]:
+                    flow_arr = flow_arr[: pos_arr.shape[0]]
+                else:
+                    pad = np.full((pos_arr.shape[0] - flow_arr.shape[0], 3), np.nan, dtype=np.float32)
+                    flow_arr = np.concatenate([flow_arr, pad], axis=0) if flow_arr.size else pad
+
+            current_vec_w = (
+                np.nanmean(flow_arr, axis=0).astype(np.float32, copy=False)
+                if flow_arr.size
+                else np.full((3,), np.nan, dtype=np.float32)
+            )
+
+            center = _to_numpy(getattr(base_env, "cylinder_center", np.zeros((1, 1, 3), dtype=np.float32)))
+            center = np.asarray(center, dtype=np.float32).reshape(-1)[:3]
+
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = traj_path.with_name(traj_path.stem + "_tmp" + traj_path.suffix)
+            np.savez_compressed(
+                tmp_path,
+                step=step_arr,
+                pos=pos_arr,
+                heading=heading_arr,
+                speed=speed_arr,
+                v_tan=vtan_arr,
+                v_tan_err=vtan_err_arr,
+                u=u_arr,
+                energy=energy_arr,
+                energy_total=energy_total,
+                flow_vel_w=flow_arr,
+                current_vec_w=current_vec_w,
+                done=done_arr,
+                cylinder_center=center,
+                cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
+                cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),
+                orbit_radius=float(getattr(base_env, "orbit_radius", 0.0)),
+                orbit_z=float(getattr(base_env, "orbit_z", 0.0)),
+                orbit_v_tan=float(getattr(base_env, "orbit_v_tan", 0.0)),
+                v_tan_ref=float(v_tan_ref) if np.isfinite(v_tan_ref) else np.nan,
+                meta=np.array(
+                    [
+                        {
+                            "task": str(getattr(getattr(cfg, "task", None), "name", "")),
+                            "algo": str(getattr(getattr(cfg, "algo", None), "name", "")),
+                            "ckpt": str(ckpt_path),
+                            "dt": float(getattr(getattr(cfg, "sim", None), "dt", 0.0)),
+                            "seed": int(seed),
+                            "steps": int(steps),
+                            "traj_env_id": int(traj_env_id),
+                            "traj_stride": int(traj_stride),
+                            "current_vec_w": current_vec_w.tolist() if np.isfinite(current_vec_w).any() else None,
+                        }
+                    ],
+                    dtype=object,
+                ),
+            )
+            tmp_path.replace(traj_path)
+            print(f"[eval] saved trajectory: {traj_path.resolve()}")
+            print(f"[eval] energy_total (Σ_t Σ_i |u_i|^3): {energy_total:.6g}")
+
+            if plot_traj:
+                try:
+                    from visualize_trajectory import plot_power_polar, plot_trajectory_3d
+
+                    traj_color_key = str(eval_cfg.get("traj_color_key", eval_cfg.get("traj_color", ""))).strip()
+                    if not traj_color_key:
+                        traj_color_key = (
+                            "v_tan_err"
+                            if (np.isfinite(v_tan_ref) and hasattr(base_env, "cylinder_center"))
+                            else "speed"
+                        )
+                    plot_trajectory_3d(
+                        traj_path=traj_path,
+                        out_path=traj_png_path,
+                        heading_stride=int(plot_heading_stride),
+                        arrow_len=float(plot_arrow_len),
+                        color_key=str(traj_color_key),
+                        show=bool(plot_show),
+                    )
+                    print(f"[eval] saved trajectory plot: {traj_png_path.resolve()}")
+
+                    if plot_energy:
+                        plot_trajectory_3d(
+                            traj_path=traj_path,
+                            out_path=traj_energy_png_path,
+                            heading_stride=int(plot_heading_stride),
+                            arrow_len=float(plot_arrow_len),
+                            color_key="energy",
+                            show=bool(plot_show),
+                        )
+                        print(f"[eval] saved energy plot: {traj_energy_png_path.resolve()}")
+
+                    if plot_energy_polar:
+                        plot_power_polar(
+                            traj_path=traj_path,
+                            out_path=traj_energy_polar_png_path,
+                            bin_deg=float(energy_polar_bin_deg),
+                            show_raw=bool(energy_polar_show_raw),
+                            show=bool(plot_show),
+                        )
+                        print(f"[eval] saved energy polar plot: {traj_energy_polar_png_path.resolve()}")
+                except Exception as exc:
+                    print(f"[eval] failed to plot trajectory: {exc}")
+        except Exception as exc:
+            print(f"[eval] failed to save trajectory: {exc}")
 
     simulation_app.close()
 

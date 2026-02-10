@@ -1,8 +1,0 @@
-- task=Hover_MPC
-- seed=-1
-- headless=false
-- enable_livestream=false
-- env.num_envs=1
-- +camera.enable=true
-- +camera.mount=at_drone
-- +camera.lock_viewport=true
