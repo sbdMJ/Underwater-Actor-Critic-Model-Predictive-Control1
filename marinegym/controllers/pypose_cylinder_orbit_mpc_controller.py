@@ -337,7 +337,94 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         self.register_buffer("_w_u", w_u)
 
         self._u_warm: torch.Tensor | None = None
+        self._last_solve_stats: dict[str, float | int | bool | str] = {}
+        self._diag_accum: dict[str, float] = {}
+        self._diag_count: int = 0
         self.requires_grad_(False)
+
+    def _trajectory_cost(
+        self,
+        x_traj: torch.Tensor,
+        u_traj: torch.Tensor,
+        *,
+        center_w: torch.Tensor,
+        radius_t: torch.Tensor,
+        z_t: torch.Tensor,
+        v_tan_t: torch.Tensor,
+        dir_sign: torch.Tensor,
+        yaw_offset_t: torch.Tensor,
+        w_err_seq: torch.Tensor | None,
+        w_u_seq: torch.Tensor | None,
+    ) -> torch.Tensor:
+        B, T, nu = u_traj.shape
+        dtype = x_traj.dtype
+        device = x_traj.device
+
+        x_flat = x_traj[:, :-1, :].reshape(B * T, self.nx)
+        c_flat = center_w.unsqueeze(1).expand(B, T, center_w.shape[-1]).reshape(B * T, center_w.shape[-1])
+        e = _orbit_errors(
+            x_flat,
+            center_w=c_flat,
+            radius=radius_t,
+            z=z_t,
+            v_tan=v_tan_t,
+            dir_sign=dir_sign,
+            yaw_offset=yaw_offset_t,
+        ).view(B, T, self.ne)
+
+        if w_err_seq is None:
+            w_err_b = self._w_err.to(device=device, dtype=dtype).view(1, 1, self.ne).expand(B, T, self.ne)
+            w_err_T = self._w_err.to(device=device, dtype=dtype).view(1, self.ne).expand(B, self.ne)
+        else:
+            w_err_b = w_err_seq
+            w_err_T = w_err_seq[:, -1, :]
+
+        if w_u_seq is None:
+            w_u_b = self._w_u.to(device=device, dtype=dtype).view(1, 1, nu).expand(B, T, nu)
+        else:
+            w_u_b = w_u_seq
+
+        stage = 0.5 * (w_err_b * e.square()).sum(dim=(-1, -2)) + 0.5 * (w_u_b * u_traj.square()).sum(dim=(-1, -2))
+
+        eT = _orbit_errors(
+            x_traj[:, -1, :],
+            center_w=center_w,
+            radius=radius_t,
+            z=z_t,
+            v_tan=v_tan_t,
+            dir_sign=dir_sign,
+            yaw_offset=yaw_offset_t,
+        )
+        terminal = 0.5 * float(self.terminal_weight_mult) * (w_err_T * eT.square()).sum(dim=-1)
+        return stage + terminal
+
+    def _accumulate_diagnostics(self, stats: dict[str, float | int | bool | str]) -> None:
+        self._last_solve_stats = stats
+        self._diag_count += 1
+        self._diag_accum["n_iters"] = self._diag_accum.get("n_iters", 0.0) + float(stats.get("n_iters", 0.0))
+        self._diag_accum["converged"] = self._diag_accum.get("converged", 0.0) + (1.0 if bool(stats.get("converged", False)) else 0.0)
+        for k in ("final_cost", "cost_reduction", "alpha", "lambda"):
+            self._diag_accum[k] = self._diag_accum.get(k, 0.0) + float(stats.get(k, 0.0))
+
+    def get_and_reset_diagnostics(self) -> dict[str, float | str]:
+        if self._diag_count <= 0:
+            out = {}
+            if self._last_solve_stats:
+                out["ilqr_stop_reason"] = str(self._last_solve_stats.get("stop_reason", "none"))
+            return out
+        n = float(self._diag_count)
+        out = {
+            "ilqr_n_iters": self._diag_accum.get("n_iters", 0.0) / n,
+            "ilqr_converged": self._diag_accum.get("converged", 0.0) / n,
+            "ilqr_final_cost": self._diag_accum.get("final_cost", 0.0) / n,
+            "ilqr_cost_reduction": self._diag_accum.get("cost_reduction", 0.0) / n,
+            "ilqr_alpha": self._diag_accum.get("alpha", 0.0) / n,
+            "ilqr_lambda": self._diag_accum.get("lambda", 0.0) / n,
+            "ilqr_stop_reason": str(self._last_solve_stats.get("stop_reason", "none")),
+        }
+        self._diag_accum = {}
+        self._diag_count = 0
+        return out
 
     def _dynamics(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         return self.system.state_transition(x, u, None)
@@ -365,7 +452,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         w_u_seq: torch.Tensor | None = None,
         gamma_d: torch.Tensor | None = None,
         x_meas_seq: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, float | int | bool | str]]:
         try:
             from torch.func import jacrev, vmap  # type: ignore
         except Exception:  # pragma: no cover
@@ -436,8 +523,39 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             if gamma_d_b.numel() != B:
                 raise ValueError(f"gamma_d must have shape ({B},) or scalar. got {tuple(gamma_d_b.shape)}")
 
-        for _ in range(self.ilqr_iters):
+        x_traj0 = self._rollout(x0, u)
+        initial_cost = self._trajectory_cost(
+            x_traj0,
+            u,
+            center_w=center_w,
+            radius_t=radius_t,
+            z_t=z_t,
+            v_tan_t=v_tan_t,
+            dir_sign=dir_sign,
+            yaw_offset_t=yaw_offset_t,
+            w_err_seq=w_err_seq,
+            w_u_seq=w_u_seq,
+        )
+        last_alpha = 1.0
+        stop_reason = "max_iters"
+        converged = False
+        n_iters = 0
+
+        for it in range(self.ilqr_iters):
+            n_iters = it + 1
             x_traj = self._rollout(x0, u)  # (B, T+1, nx)
+            cost_before = self._trajectory_cost(
+                x_traj,
+                u,
+                center_w=center_w,
+                radius_t=radius_t,
+                z_t=z_t,
+                v_tan_t=v_tan_t,
+                dir_sign=dir_sign,
+                yaw_offset_t=yaw_offset_t,
+                w_err_seq=w_err_seq,
+                w_u_seq=w_u_seq,
+            )
             if x_meas_seq is None:
                 x_meas_traj = x_traj
             else:
@@ -539,18 +657,81 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             K = torch.stack(list(reversed(K)), dim=1)  # (B, T, nu, nx)
             k = torch.stack(list(reversed(k)), dim=1)  # (B, T, nu)
 
-            # forward update (alpha=1)
-            x = x0
-            new_u = []
-            for t in range(T):
-                dx = x - x_traj[:, t, :]
-                ut = u[:, t, :] + k[:, t, :] + torch.einsum("bij,bj->bi", K[:, t, :, :], dx)
-                ut = ut.clamp(-1.0, 1.0)
-                new_u.append(ut)
-                x = self._dynamics(x, ut)
-            u = torch.stack(new_u, dim=1)
+            # forward update with simple line-search over alpha
+            best_u = u
+            best_cost = cost_before
+            alpha_candidates = (1.0, 0.5, 0.25, 0.1)
+            for alpha in alpha_candidates:
+                x = x0
+                new_u = []
+                for t in range(T):
+                    dx = x - x_traj[:, t, :]
+                    ut = u[:, t, :] + alpha * k[:, t, :] + torch.einsum("bij,bj->bi", K[:, t, :, :], dx)
+                    ut = ut.clamp(-1.0, 1.0)
+                    new_u.append(ut)
+                    x = self._dynamics(x, ut)
+                cand_u = torch.stack(new_u, dim=1)
+                cand_x = self._rollout(x0, cand_u)
+                cand_cost = self._trajectory_cost(
+                    cand_x,
+                    cand_u,
+                    center_w=center_w,
+                    radius_t=radius_t,
+                    z_t=z_t,
+                    v_tan_t=v_tan_t,
+                    dir_sign=dir_sign,
+                    yaw_offset_t=yaw_offset_t,
+                    w_err_seq=w_err_seq,
+                    w_u_seq=w_u_seq,
+                )
+                if torch.isfinite(cand_cost).all() and (cand_cost.mean() <= best_cost.mean()):
+                    best_cost = cand_cost
+                    best_u = cand_u
+                    last_alpha = float(alpha)
+                    break
 
-        return u
+            rel_red = ((cost_before.mean() - best_cost.mean()) / cost_before.mean().abs().clamp_min(1e-9)).item()
+            if best_cost.mean() <= cost_before.mean():
+                u = best_u
+            else:
+                stop_reason = "no_descent"
+                break
+            if rel_red < 1e-4:
+                converged = True
+                stop_reason = "small_reduction"
+                break
+
+        final_x = self._rollout(x0, u)
+        final_cost = self._trajectory_cost(
+            final_x,
+            u,
+            center_w=center_w,
+            radius_t=radius_t,
+            z_t=z_t,
+            v_tan_t=v_tan_t,
+            dir_sign=dir_sign,
+            yaw_offset_t=yaw_offset_t,
+            w_err_seq=w_err_seq,
+            w_u_seq=w_u_seq,
+        )
+        if not torch.isfinite(final_cost).all():
+            stop_reason = "nonfinite_cost"
+            converged = False
+        elif not converged and stop_reason == "max_iters":
+            converged = bool((final_cost.mean() < initial_cost.mean()).item())
+            if not converged:
+                stop_reason = "max_iters_no_improve"
+
+        stats = {
+            "n_iters": int(n_iters),
+            "converged": bool(converged),
+            "stop_reason": str(stop_reason),
+            "final_cost": float(final_cost.mean().detach().item()),
+            "cost_reduction": float((initial_cost.mean() - final_cost.mean()).detach().item()),
+            "alpha": float(last_alpha),
+            "lambda": float(self.ilqr_reg),
+        }
+        return u, stats
 
     def compute(
         self,
@@ -591,7 +772,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
         if skip_gamma_d_without_x_meas_seq and x_meas_seq is None:
             gamma_d_eff = None
 
-        u_traj = self._ilqr(
+        u_traj, solve_stats = self._ilqr(
             x0d,
             center_w=cd,
             radius=radius,
@@ -606,6 +787,7 @@ class PyPoseCylinderOrbitMPCController(ControllerBase):
             x_meas_seq=x_meas_seq,
         )
         self._u_warm = torch.cat([u_traj[:, 1:, :], torch.zeros_like(u_traj[:, :1, :])], dim=1).detach()
+        self._accumulate_diagnostics(solve_stats)
 
         u0 = u_traj[:, 0, :].to(dtype=root_state.dtype)
         return torch.clamp(u0, -1.0, 1.0)

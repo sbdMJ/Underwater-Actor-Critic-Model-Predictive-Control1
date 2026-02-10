@@ -97,6 +97,13 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     werr_init: Optional[List[float]] = None  # (10,)
     wu_init: Optional[List[float]] = None  # (nu,)
 
+    # Step-0 diagnostic: disable learned cost adaptation and keep MPC weights fixed.
+    fixed_cost_weights: bool = False
+    fixed_cost_time_invariant: bool = True
+    fixed_werr: Optional[List[float]] = None  # (10,), defaults to werr_init when unset
+    fixed_wu: Optional[List[float]] = None  # (nu,), defaults to wu_init when unset
+    freeze_actor_updates: bool = False
+
 
 cs = ConfigStore.instance()
 cs.store("ppo_pypose_cylinder_mpc_werr_wu_tv", node=PPOPyposeCylinderMPCWErrWUTVConfig, group="algo")
@@ -215,6 +222,9 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         )
         self.head = nn.Linear(hidden, out_dim)
 
+        self.fixed_cost_weights = bool(getattr(cfg, "fixed_cost_weights", False))
+        self.fixed_cost_time_invariant = bool(getattr(cfg, "fixed_cost_time_invariant", True))
+
         werr0 = torch.as_tensor(cfg.werr_init, dtype=torch.float32) if cfg.werr_init is not None else None
         wu0 = torch.as_tensor(cfg.wu_init, dtype=torch.float32) if cfg.wu_init is not None else None
         if werr0 is None:
@@ -243,7 +253,29 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         with torch.no_grad():
             self.head.bias.copy_(raw0)
 
+        if self.fixed_cost_weights:
+            fixed_werr = torch.as_tensor(cfg.fixed_werr, dtype=torch.float32) if cfg.fixed_werr is not None else werr0
+            fixed_wu = torch.as_tensor(cfg.fixed_wu, dtype=torch.float32) if cfg.fixed_wu is not None else wu0
+            if int(fixed_werr.numel()) != self.ne:
+                raise ValueError(f"fixed_werr must have length {self.ne}. got {int(fixed_werr.numel())}")
+            if int(fixed_wu.numel()) != self.nu:
+                raise ValueError(f"fixed_wu must have length {self.nu}. got {int(fixed_wu.numel())}")
+            fixed_werr = fixed_werr.clamp(min=cfg.werr_lb, max=cfg.werr_ub)
+            fixed_wu = fixed_wu.clamp(min=cfg.wu_lb, max=cfg.wu_ub)
+            self.register_buffer("fixed_werr", fixed_werr.view(1, 1, self.ne), persistent=False)
+            self.register_buffer("fixed_wu", fixed_wu.view(1, 1, self.nu), persistent=False)
+
     def forward(self, obs_flat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.fixed_cost_weights:
+            B = int(obs_flat.shape[0])
+            if self.fixed_cost_time_invariant:
+                w_err = self.fixed_werr.expand(B, self.horizon, self.ne)
+                w_u = self.fixed_wu.expand(B, self.horizon, self.nu)
+            else:
+                w_err = self.fixed_werr.expand(B, 1, self.ne).repeat(1, self.horizon, 1)
+                w_u = self.fixed_wu.expand(B, 1, self.nu).repeat(1, self.horizon, 1)
+            return w_err, w_u
+
         feat = self.trunk(obs_flat)
         raw = self.head(feat).view(obs_flat.shape[0], self.horizon, self.ne + self.nu)
         raw_e = raw[..., : self.ne]
@@ -459,6 +491,7 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
             state_dict = torch.load(self.cfg.checkpoint_path)
             self.load_state_dict(state_dict, strict=False)
 
+        self.freeze_actor_updates = bool(getattr(self.cfg, "freeze_actor_updates", False))
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=5e-4)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=5e-4)
         self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
@@ -540,9 +573,16 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
         self.actor_opt.zero_grad()
         self.critic_opt.zero_grad()
         loss.backward()
-        actor_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.actor.parameters(), 5)
+        if self.freeze_actor_updates:
+            for p in self.actor.parameters():
+                if p.grad is not None:
+                    p.grad.zero_()
+            actor_grad_norm = torch.tensor(0.0, device=loss.device)
+        else:
+            actor_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.actor.parameters(), 5)
         critic_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.critic.parameters(), 5)
-        self.actor_opt.step()
+        if not self.freeze_actor_updates:
+            self.actor_opt.step()
         self.critic_opt.step()
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
         return TensorDict(

@@ -836,6 +836,18 @@ def main(cfg):
                     info["train/action_sat_frac"] = (actions.abs() > 0.99).float().mean().item()
                 except Exception:
                     pass
+            # PyPose cylinder-orbit iLQR diagnostics (for convergence debugging in wandb).
+            if algo_name == "ppo_pypose_cylinder_mpc_werr_wu_tv":
+                try:
+                    for m in policy.modules():
+                        mpc_obj = getattr(m, "mpc", None)
+                        if mpc_obj is not None and hasattr(mpc_obj, "get_and_reset_diagnostics"):
+                            diag = mpc_obj.get_and_reset_diagnostics()
+                            info.update({f"train/{k}": v for k, v in diag.items()})
+                            break
+                except Exception:
+                    pass
+
             # MPC solver diagnostics (acados failures often look like "robot doesn't move").
             if algo_name in ("ac_mpc", "ac_mpc_pypose"):
                 try:
