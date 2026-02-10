@@ -67,7 +67,10 @@ def _maybe_prepare_pypose_mpc_cfg(cfg, base_env, *, algo_name: str, out_dir: Pat
     except Exception:
         pass
 
-    algo.mpc_dt = float(cfg.sim.dt)
+    dt_scale = float(cfg.task.get("pypose_mpc_dt_scale", algo.get("mpc_dt_scale", 1.0)))
+    if dt_scale <= 0.0:
+        dt_scale = 1.0
+    algo.mpc_dt = float(cfg.sim.dt) * dt_scale
 
     try:
         algo.obs_time_encoding_dim = int(getattr(base_env, "time_encoding_dim", 0)) if bool(cfg.task.time_encoding) else 0

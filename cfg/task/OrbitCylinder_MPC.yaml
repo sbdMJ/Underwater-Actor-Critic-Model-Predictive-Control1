@@ -157,6 +157,9 @@ pypose_mpc_horizon: 5
 pypose_mpc_ilqr_iters: 6
 pypose_mpc_ilqr_reg: 1e-3
 pypose_mpc_terminal_weight_mult: 50.0
+# Variable time-step MPC: effective MPC integration step = sim.dt * pypose_mpc_dt_scale.
+# Keep horizon short (N=3~5) while extending look-ahead via larger dt.
+pypose_mpc_dt_scale: 1.6
 # If unset, falls back to mpc_max_thruster_force.
 pypose_max_thruster_force: 40.0
 

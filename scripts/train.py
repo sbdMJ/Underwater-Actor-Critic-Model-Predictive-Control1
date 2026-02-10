@@ -193,7 +193,10 @@ def main(cfg):
         except Exception:
             pass
 
-        cfg.algo.mpc_dt = float(cfg.sim.dt)
+        dt_scale = float(cfg.task.get("pypose_mpc_dt_scale", cfg.algo.get("mpc_dt_scale", 1.0)))
+        if dt_scale <= 0.0:
+            dt_scale = 1.0
+        cfg.algo.mpc_dt = float(cfg.sim.dt) * dt_scale
         # Help the MPC head parse observation layout.
         try:
             cfg.algo.obs_time_encoding_dim = int(getattr(base_env, "time_encoding_dim", 0)) if bool(cfg.task.time_encoding) else 0
