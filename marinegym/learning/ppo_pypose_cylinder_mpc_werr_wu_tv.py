@@ -345,7 +345,10 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
-        w_err_seq[..., 2] = w_err_seq[..., 2].clamp_min(float(self.cfg.werr_tan_min))
+        # NOTE: avoid in-place write on autograd-tracked tensor slice.
+        # In-place updates here can trigger version-counter mismatch during backward.
+        tan_col = w_err_seq[..., 2:3].clamp_min(float(self.cfg.werr_tan_min))
+        w_err_seq = torch.cat([w_err_seq[..., :2], tan_col, w_err_seq[..., 3:]], dim=-1)
 
         R_add = R.clamp(min=0.0, max=float(self.cfg.R_add_max))
         w_u_seq = (w_u_seq + R_add.view(-1, 1, 1)).clamp(
