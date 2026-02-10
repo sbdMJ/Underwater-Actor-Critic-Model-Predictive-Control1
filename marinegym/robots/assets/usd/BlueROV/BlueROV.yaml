@@ -1,8 +1,6 @@
 name: BlueROV
 
 drag_coef: 0.3
-# Keep baseline BlueROV near neutral buoyancy to avoid immediate sink at reset.
-buoyancy_mode: neutral
 volume: 0.0113459
 coBM: -0.01
 hydro_coef:
