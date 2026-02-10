@@ -89,6 +89,13 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     weights_log_scale: bool = True
     cost_hidden: int = 256
     R_min_coeff: float = 0.2
+    # Optional clamp for the actor-generated additive input penalty (R).
+    # Prevents the policy from collapsing into a near-zero-thrust local optimum.
+    R_add_max: float = 0.08
+    # Keep the final input penalty bounded after adding R.
+    total_wu_ub: float = 0.2
+    # Keep tangential-speed term active so orbit progress does not vanish.
+    werr_tan_min: float = 2.0
     gamma_d_max: float = 5.0
 
     critic_worstcase_k: int = 1
@@ -338,7 +345,13 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
-        w_u_seq = w_u_seq + R.view(-1, 1, 1)
+        w_err_seq[..., 2] = w_err_seq[..., 2].clamp_min(float(self.cfg.werr_tan_min))
+
+        R_add = R.clamp(min=0.0, max=float(self.cfg.R_add_max))
+        w_u_seq = (w_u_seq + R_add.view(-1, 1, 1)).clamp(
+            min=float(self.cfg.wu_lb),
+            max=float(self.cfg.total_wu_ub),
+        )
 
         if bool(getattr(self.cfg, "obs_has_cylinder_rel", False)):
             center = obs_flat[:, -3:].to(dtype=root_state.dtype)  # cylinder_center - target_pos
