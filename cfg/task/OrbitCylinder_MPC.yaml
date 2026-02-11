@@ -191,6 +191,13 @@ spawn_fixed: true
 terminate_distance: 10.0 #2.3
 terminate_min_z: 0.1
 
+# Optional: terminate early when radial orbit error is too large.
+# radial_error = | ||p_xy - center_xy|| - orbit_radius |
+# Helpful for faster recovery-focused learning under strong disturbances.
+terminate_orbit_error_enable: false
+terminate_orbit_error_max: 0.70
+terminate_orbit_error_grace_steps: 40
+
 # Optional: terminate if the vehicle stays (almost) stationary in XY for too long.
 # This helps avoid "do nothing" local optima during RL training (earning only effort reward).
 terminate_stationary_enable: false

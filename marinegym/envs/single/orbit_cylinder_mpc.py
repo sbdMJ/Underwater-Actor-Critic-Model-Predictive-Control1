@@ -121,6 +121,12 @@ class OrbitCylinderMPC(HoverMPC):
             self._stationary_steps_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
             self._stationary_prev_xy = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.float32)
 
+        # Optional termination: if radial orbit error gets too large, end episode early.
+        # This helps restart training quickly instead of collecting long off-orbit trajectories.
+        self.terminate_orbit_error_enable = bool(cfg.task.get("terminate_orbit_error_enable", False))
+        self.terminate_orbit_error_max = float(cfg.task.get("terminate_orbit_error_max", 0.0))
+        self.terminate_orbit_error_grace_steps = int(cfg.task.get("terminate_orbit_error_grace_steps", 0))
+
         # Optional reward shaping: if the vehicle stays (almost) in place for too long, subtract a penalty.
         # This discourages "do nothing" local optima even when termination is disabled.
         self.reward_orbit_stationary_w = float(cfg.task.get("reward_orbit_w_stationary", 0.0))
@@ -741,6 +747,27 @@ class OrbitCylinderMPC(HoverMPC):
         if self.reward_mode == "orbit_ppo":
             try:
                 terminated = terminated | terminate_orbit_ppo
+            except Exception:
+                pass
+
+        # Optional: terminate when radial orbit error is too large for too long.
+        if (
+            bool(getattr(self, "terminate_orbit_error_enable", False))
+            and float(getattr(self, "terminate_orbit_error_max", 0.0)) > 0.0
+        ):
+            try:
+                rel_xy = root_state[:, 0:2] - center_env[:, 0:2]
+                radius_xy = torch.linalg.norm(rel_xy, dim=-1)
+                orbit_err_xy = torch.abs(radius_xy - float(self.orbit_radius))
+
+                grace = int(getattr(self, "terminate_orbit_error_grace_steps", 0))
+                if grace > 0:
+                    active = self.progress_buf >= float(grace)
+                else:
+                    active = torch.ones_like(orbit_err_xy, dtype=torch.bool, device=orbit_err_xy.device)
+
+                too_far = active & (orbit_err_xy > float(self.terminate_orbit_error_max))
+                terminated = terminated | too_far.view(self.num_envs, 1)
             except Exception:
                 pass
 
