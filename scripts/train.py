@@ -345,7 +345,14 @@ def main(cfg):
                 cfg.algo.orbit_z = float(cfg.task.get("orbit_z", float(center_cfg[2]))) - float(center_cfg[2])
 
             include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
-            if orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
+            if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit") and not include_cylinder_rel:
+                logging.warning(
+                    "Orbit reward mode uses cylinder-orbit errors; forcing include_cylinder_rel_in_obs=true "
+                    "so the actor-side differentiable MPC always receives cylinder center information."
+                )
+                include_cylinder_rel = True
+                cfg.task.include_cylinder_rel_in_obs = True
+            elif orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
                 logging.warning(
                     "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
                     "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."

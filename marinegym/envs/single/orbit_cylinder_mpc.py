@@ -44,10 +44,12 @@ class OrbitCylinderMPC(HoverMPC):
         super().__init__(cfg, headless)
 
         flow_cfg = self.disturbances[self.mode]["flow"] if hasattr(self, "disturbances") else {}
-        self.flow_update_mode = str(flow_cfg.get("update_mode", "reset")).strip().lower()
-        self.flow_init_mode = str(flow_cfg.get("init_mode", "uniform")).strip().lower()
+        default_update_mode = "hybrid" if self.training else "ou"
+        default_init_mode = "uniform_signed" if self.training else "uniform"
+        self.flow_update_mode = str(flow_cfg.get("update_mode", default_update_mode)).strip().lower()
+        self.flow_init_mode = str(flow_cfg.get("init_mode", default_init_mode)).strip().lower()
         self.flow_hybrid_prob = float(flow_cfg.get("hybrid_prob", 0.5))
-        self.flow_tau = float(flow_cfg.get("tau", 0.0))
+        self.flow_tau = float(flow_cfg.get("tau", 2.0))
         self.flow_sigma = flow_cfg.get("sigma", getattr(self, "flow_velocity_gaussian_noise", 0.0))
         if getattr(self, "enable_flow", False):
             self._flow_sigma_tensor = torch.tensor(self.flow_sigma, device=self.device, dtype=torch.float32)
@@ -850,7 +852,8 @@ class OrbitCylinderMPC(HoverMPC):
             return
         flow = self.drone.flow_vels[:, 0, :]
         max_flow = self._flow_max_tensor.to(device=flow.device, dtype=flow.dtype)
-        sigma = self._flow_sigma_tensor.to(device=flow.device, dtype=flow.dtype)
+        sigma = self._flow_sigma_tensor.to(device=flow.device, dtype=flow.dtype).clamp_min(0.0)
+        sigma = torch.minimum(sigma, max_flow)
         if mode == "hybrid":
             mask = self._flow_hybrid_ou_mask
             if mask.shape[0] != flow.shape[0]:
