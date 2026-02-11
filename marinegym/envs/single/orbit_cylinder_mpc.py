@@ -184,6 +184,8 @@ class OrbitCylinderMPC(HoverMPC):
             "cos_yaw",
             "delta_theta",
             "v_tan",
+            "v_tan_err",
+            "v_tan_shortfall",
             "v_rad",
             "delta_xy",
             "dist_xy",
@@ -191,6 +193,7 @@ class OrbitCylinderMPC(HoverMPC):
             "e_z",
             "roll",
             "pitch",
+            "penalty_v_tan_shortfall",
             "penalty_u",
             "penalty_du",
             "penalty_omega",
@@ -532,6 +535,7 @@ class OrbitCylinderMPC(HoverMPC):
                 w_p=float(self.cfg.task.get("reward_orbit_w_progress", 0.5)),
                 w_a=float(self.cfg.task.get("reward_orbit_w_att", 0.25)),
                 w_back=float(self.cfg.task.get("reward_orbit_w_backwards", 0.0)),
+                w_vtan_shortfall=float(self.cfg.task.get("reward_orbit_w_vtan_shortfall", 0.0)),
                 w_u=float(self.cfg.task.get("reward_orbit_w_u", 0.05)),
                 w_du=float(self.cfg.task.get("reward_orbit_w_du", 0.10)),
                 w_w=float(self.cfg.task.get("reward_orbit_w_omega", 0.02)),
@@ -794,6 +798,8 @@ class OrbitCylinderMPC(HoverMPC):
                 self.stats["cos_yaw"].lerp_(terms["cos_yaw"], (1 - self.alpha))
                 self.stats["delta_theta"].lerp_(terms["delta_theta"].abs(), (1 - self.alpha))
                 self.stats["v_tan"].lerp_(terms["v_tan"], (1 - self.alpha))
+                self.stats["v_tan_err"].lerp_(terms.get("v_tan_err", torch.zeros_like(reward)), (1 - self.alpha))
+                self.stats["v_tan_shortfall"].lerp_(terms.get("v_tan_shortfall", torch.zeros_like(reward)), (1 - self.alpha))
                 self.stats["v_rad"].lerp_(terms.get("v_rad", torch.zeros_like(reward)), (1 - self.alpha))
                 self.stats["delta_xy"].lerp_(terms["delta_xy"], (1 - self.alpha))
                 self.stats["dist_xy"].lerp_(terms["dist_xy"], (1 - self.alpha))
@@ -801,6 +807,7 @@ class OrbitCylinderMPC(HoverMPC):
                 self.stats["e_z"].lerp_(terms["e_z"], (1 - self.alpha))
                 self.stats["roll"].lerp_(terms["roll"].abs(), (1 - self.alpha))
                 self.stats["pitch"].lerp_(terms["pitch"].abs(), (1 - self.alpha))
+                self.stats["penalty_v_tan_shortfall"].lerp_(terms.get("penalty_v_tan_shortfall", torch.zeros_like(reward)), (1 - self.alpha))
                 self.stats["penalty_u"].lerp_(terms["penalty_u"], (1 - self.alpha))
                 self.stats["penalty_du"].lerp_(terms["penalty_du"], (1 - self.alpha))
                 self.stats["penalty_omega"].lerp_(terms["penalty_omega"], (1 - self.alpha))

@@ -58,6 +58,10 @@ class OrbitPPORewardCfg:
     # Penalize progress in the wrong (opposite) orbit direction.
     w_back: float = 0.0
 
+    # Tangential-speed penalty (discourage "slow/stationary" local optima).
+    # penalty_vtan_shortfall = r_radius * ((max(0, v_tan_ref - v_tan) / v_tan_ref)^2 clipped)
+    w_vtan_shortfall: float = 0.0
+
     # Penalty weights.
     w_u: float = 0.05
     w_du: float = 0.10
@@ -163,6 +167,14 @@ def compute_orbit_ppo_reward_terms(
     progress_vtan = (v_tan / v_tan_ref).clamp(0.0, 1.0)
     progress_vtan_back = (-v_tan / v_tan_ref).clamp(0.0, 1.0)
 
+    # Tangential-speed shortfall penalty (applied only when v_tan < v_tan_ref).
+    v_tan_err = (v_tan - v_tan_ref).abs()
+    vtan_shortfall = ((v_tan_ref - v_tan) / v_tan_ref).clamp(min=0.0)
+    # Clip to keep the penalty bounded even if v_tan goes strongly negative.
+    penalty_vtan_shortfall_raw = vtan_shortfall.square().clamp(0.0, 4.0)
+    # Gate by radius-tracking quality: if we're far from the desired radius, don't over-penalize tangential speed.
+    penalty_vtan_shortfall = penalty_vtan_shortfall_raw * r_radius
+
     mode = str(cfg.progress_mode).strip().lower()
     if mode == "vtan":
         r_progress = progress_vtan
@@ -210,6 +222,7 @@ def compute_orbit_ppo_reward_terms(
         + float(cfg.w_p) * r_progress
         + float(cfg.w_a) * r_att
         - float(cfg.w_back) * r_progress_back
+        - float(getattr(cfg, "w_vtan_shortfall", 0.0)) * penalty_vtan_shortfall
         - float(cfg.w_u) * penalty_u
         - float(cfg.w_du) * penalty_du
         - float(cfg.w_w) * penalty_omega
@@ -244,6 +257,8 @@ def compute_orbit_ppo_reward_terms(
         "theta": theta,
         "delta_theta": dtheta,
         "v_tan": v_tan,
+        "v_tan_err": v_tan_err,
+        "v_tan_shortfall": vtan_shortfall,
         "v_rad": v_rad,
         "dist_xy": dist_xy,
         "e_r": e_r,
@@ -251,6 +266,7 @@ def compute_orbit_ppo_reward_terms(
         "roll": roll.view(-1, 1),
         "pitch": pitch.view(-1, 1),
         "r_att": r_att,
+        "penalty_v_tan_shortfall": penalty_vtan_shortfall,
         "penalty_u": penalty_u,
         "penalty_du": penalty_du,
         "penalty_omega": penalty_omega,

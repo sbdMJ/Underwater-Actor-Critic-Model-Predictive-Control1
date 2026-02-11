@@ -84,6 +84,116 @@ def _atomic_replace(src_path: Path, dst_path: Path) -> None:
         os.rename(str(src_path), str(dst_path))
 
 
+def _resolve_out_dir(out_dir: str | Path, *, launch_cwd: Path) -> Path:
+    out_path = Path(str(out_dir)).expanduser()
+    if not out_path.is_absolute():
+        out_path = launch_cwd / out_path
+    return out_path
+
+
+def _to_uint8_rgb(img: np.ndarray) -> np.ndarray:
+    """Convert CHW/HWC RGB(A) arrays to uint8 HWC RGB."""
+    img = np.asarray(img)
+    if img.ndim == 3 and img.shape[0] in (1, 3, 4):
+        img = np.transpose(img, (1, 2, 0))
+    if img.ndim == 2:
+        img = img[:, :, None]
+    if img.ndim != 3:
+        raise ValueError(f"Expected 2D/3D image, got shape={img.shape}")
+
+    # Drop alpha if present.
+    if img.shape[2] == 4:
+        img = img[:, :, :3]
+
+    if np.issubdtype(img.dtype, np.floating):
+        maxv = float(np.nanmax(img)) if img.size else 0.0
+        if maxv <= 1.0 + 1e-6:
+            img = img * 255.0
+        img = np.clip(img, 0.0, 255.0).astype(np.uint8)
+    else:
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
+
+    if img.shape[2] == 1:
+        img = np.repeat(img, 3, axis=2)
+    return img
+
+
+def _save_camera_images(
+    imgs,
+    *,
+    out_dir: Path,
+    step: int,
+    tag: str,
+    prefix: str = "camera",
+    fmt: str = "png",
+    keys: list[str] | None = None,
+) -> int:
+    """
+    Save camera frames returned by `Camera.get_images()`.
+
+    - Saves `rgb` as image files (png/jpg/...) under `<out_dir>/rgb/`.
+    - Saves other keys as `.npy` under `<out_dir>/<key>/`.
+    """
+    fmt = str(fmt).lstrip(".").lower() or "png"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if keys is None:
+        try:
+            keys = list(imgs.keys())
+        except Exception:
+            keys = ["rgb"]
+
+    saved = 0
+    for key in keys:
+        try:
+            if key not in imgs.keys():
+                continue
+            data = imgs[key]
+        except Exception:
+            continue
+
+        if isinstance(data, torch.Tensor):
+            tensor = data.detach()
+            if tensor.ndim == 3:
+                tensor = tensor.unsqueeze(0)
+            elif tensor.ndim > 4:
+                tensor = tensor.reshape(-1, *tensor.shape[-3:])
+        else:
+            arr = np.asarray(data)
+            if arr.ndim == 3:
+                arr = arr[None, ...]
+            elif arr.ndim > 4:
+                arr = arr.reshape(-1, *arr.shape[-3:])
+            tensor = torch.as_tensor(arr)
+
+        n = int(tensor.shape[0]) if tensor.ndim >= 4 else 1
+        key_dir = out_dir / str(key)
+        key_dir.mkdir(parents=True, exist_ok=True)
+
+        for env_i in range(n):
+            frame = tensor[env_i].detach().cpu().numpy()
+            if str(key).lower() == "rgb":
+                img_u8 = _to_uint8_rgb(frame)
+                fname = f"{prefix}_{tag}_step{int(step):07d}_env{int(env_i):02d}.{fmt}"
+                out_path = key_dir / fname
+                try:
+                    import imageio.v2 as imageio  # noqa: WPS433
+                except Exception:  # pragma: no cover
+                    import imageio  # noqa: WPS433
+
+                imageio.imwrite(str(out_path), img_u8)
+                saved += 1
+            else:
+                fname = f"{prefix}_{tag}_step{int(step):07d}_env{int(env_i):02d}.npy"
+                out_path = key_dir / fname
+                np.save(str(out_path), frame)
+                saved += 1
+
+    return saved
+
+
 def _maybe_import_orbit_errors():
     try:
         from marinegym.controllers.pypose_cylinder_orbit_mpc_controller import _orbit_errors  # noqa: WPS433
@@ -151,15 +261,21 @@ def main(cfg):
       ~/isaac410/python.sh scripts/test_mpc_withCam.py task=OrbitCylinder_MPC headless=false enable_livestream=false env.num_envs=1 task.use_pypose_mpc=true +camera.head_offset='[0.4,0,0.15]' task.pypose_orbit_mode=cylinder_cost
 
     Trajectory logging (default on):
-      - Saves `trajectory.npz` under Hydra's run dir (./outputs/...).
+      - Saves `trajectory.npz` under the launch working directory by default.
       - Saves two plots by default:
-          - `trajectory.png`         (OrbitCylinder_MPC: |v_tan - v_tan_des| colormap; otherwise speed colormap)
+          - `trajectory.png`         (default colormap: `v_tan_err`)
           - `trajectory_energy.png`  (energy proxy colormap, E = Σ|u_i|^3, if available)
           - `trajectory_energy_polar.png` (polar plot: orbit angle vs instantaneous power proxy, P_total = Σ|u_i|^3)
       - Disable with `+traj_log.enable=false`.
       - Override paths with `+traj_log.traj_path=/tmp/trajectory.npz +traj_log.traj_png_path=/tmp/trajectory.png`.
       - Override trajectory colormap key with `+traj_log.color_key=speed` (or `v_tan_err`, `energy`, ...).
       - Re-visualize later: `python scripts/visualize_trajectory.py /path/to/trajectory.npz`
+
+    Camera frame saving (optional; off by default):
+      - Enable: `+camera.save=true`
+      - Output dir: `+camera.out_dir=outputs/camera` (relative paths resolve from the launch directory)
+      - Save keys: `+camera.save_keys=[rgb]` (default: camera.data_types)
+      - Interval: use existing `camera.capture_interval` (e.g. `+camera.capture_interval=60`)
 
     """
     OmegaConf.register_new_resolver("eval", eval)
@@ -246,6 +362,30 @@ def main(cfg):
             camera.initialize(prim_paths_expr=f"/World/envs/env_.*/{drone_name}_.*/base_link/Camera_.*")
         else:
             camera.initialize()
+
+    launch_cwd = _get_launch_cwd()
+    camera_save_enable = False
+    camera_save_out_dir: Path | None = None
+    camera_save_keys: list[str] = []
+    camera_save_prefix = "camera"
+    camera_save_fmt = "png"
+    camera_save_print = False
+    if camera is not None:
+        camera_save_enable = bool(camera_cfg.get("save", False))
+        camera_save_print = bool(camera_cfg.get("save_print", False))
+        if camera_save_enable:
+            out_dir_raw = camera_cfg.get("out_dir", camera_cfg.get("save_dir", "outputs/camera"))
+            camera_save_out_dir = _resolve_out_dir(out_dir_raw, launch_cwd=launch_cwd)
+            camera_save_out_dir.mkdir(parents=True, exist_ok=True)
+            camera_save_prefix = str(camera_cfg.get("save_prefix", camera_cfg.get("prefix", "camera")))
+            camera_save_fmt = str(camera_cfg.get("save_format", "png"))
+            camera_save_keys = list(camera_cfg.get("save_keys", camera_cfg.get("data_types", ["rgb"])))
+            print(
+                "[test_mpc_withCam] camera.save=true:",
+                f"out_dir={camera_save_out_dir.resolve()}",
+                f"keys={camera_save_keys}",
+                f"format={str(camera_save_fmt).lstrip('.').lower()}",
+            )
 
     td = env.reset()
     dummy_action = env.action_spec.zero()
@@ -423,6 +563,21 @@ def main(cfg):
         imgs = camera.get_images()
         if "rgb" in imgs.keys():
             print("[test_mpc_withCam] camera.rgb:", tuple(imgs["rgb"].shape))
+        if camera_save_enable and camera_save_out_dir is not None:
+            try:
+                n_saved = _save_camera_images(
+                    imgs,
+                    out_dir=camera_save_out_dir,
+                    step=0,
+                    tag="reset",
+                    prefix=camera_save_prefix,
+                    fmt=camera_save_fmt,
+                    keys=camera_save_keys,
+                )
+                if camera_save_print:
+                    print(f"[test_mpc_withCam] saved camera frames on reset: {n_saved}")
+            except Exception as e:
+                print(f"[test_mpc_withCam] failed to save camera frames on reset: {e}")
 
     layered_orbit_cfg = cfg.get("layered_orbit", None)
     if layered_orbit_cfg is None:
@@ -870,7 +1025,22 @@ def main(cfg):
                 env.render()
             if camera is not None and capture_interval > 0 and (step_idx % capture_interval) == 0:
                 base_env.sim.render()
-                _ = camera.get_images()
+                imgs = camera.get_images()
+                if camera_save_enable and camera_save_out_dir is not None:
+                    try:
+                        n_saved = _save_camera_images(
+                            imgs,
+                            out_dir=camera_save_out_dir,
+                            step=int(step_idx),
+                            tag="step",
+                            prefix=camera_save_prefix,
+                            fmt=camera_save_fmt,
+                            keys=camera_save_keys,
+                        )
+                        if camera_save_print:
+                            print(f"[test_mpc_withCam] saved camera frames: step={step_idx} n={n_saved}")
+                    except Exception as e:
+                        print(f"[test_mpc_withCam] failed to save camera frames: step={step_idx} err={e}")
             step_idx += 1
 
             if layered_orbit_enable:
@@ -987,11 +1157,7 @@ def main(cfg):
 
                     traj_color_key = str(traj_cfg.get("color_key", traj_cfg.get("traj_color_key", ""))).strip()
                     if not traj_color_key:
-                        traj_color_key = (
-                            "v_tan_err"
-                            if (hasattr(base_env, "orbit_v_tan") and hasattr(base_env, "cylinder_center"))
-                            else "speed"
-                        )
+                        traj_color_key = "v_tan_err"
 
                     plot_trajectory_3d(
                         traj_path=traj_path,

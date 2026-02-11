@@ -39,7 +39,7 @@ def plot_trajectory_3d(
     heading_stride: int = 50,
     arrow_len: float = 0.25,
     show: bool = False,
-    color_key: Optional[str] = "speed",
+    color_key: Optional[str] = "v_tan_err",
     color_label: Optional[str] = None,
     cmap: Optional[str] = None,
     path_color_mode: str = "default",
@@ -506,7 +506,7 @@ def _main():
     parser.add_argument(
         "--color-key",
         type=str,
-        default="speed",
+        default="v_tan_err",
         help="Scalar key in the .npz to color by (e.g., speed, energy). Set to empty to disable.",
     )
     parser.add_argument(

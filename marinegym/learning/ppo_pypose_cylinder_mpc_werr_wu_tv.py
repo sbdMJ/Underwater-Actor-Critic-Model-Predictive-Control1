@@ -330,10 +330,26 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         r_raw = actor_out[:, 0]
         gamma_d_raw = actor_out[:, 1]
 
-        R_base = torch.exp(r_raw)
+        # IMPORTANT: w_u_seq is interpreted as a "force penalty" weight (like acados r_u) and will be
+        # multiplied by max_thruster_force^2 inside the MPC. Therefore, any additive term here must
+        # be on the same order as the task's r_u (~1e-3), otherwise the MPC will output near-zero
+        # actions and the vehicle will fail to orbit at initialization.
+        ru_ref = None
+        try:
+            if getattr(self.cfg, "wu_init", None):
+                ru_ref = float(np.mean(self.cfg.wu_init))
+        except Exception:
+            ru_ref = None
+        if ru_ref is None:
+            ru_ref = float(getattr(self.cfg, "wu_lb", 1e-3))
+        ru_ref = max(ru_ref, float(getattr(self.cfg, "wu_lb", 1e-3)))
+
+        # Clamp raw output to avoid exp overflow and overly stiff input penalties.
+        r_raw = r_raw.clamp(min=-5.0, max=5.0)
+        R_base = ru_ref * torch.exp(r_raw)
         dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
         orbit_err = torch.abs(dist_xy - float(self.cfg.orbit_radius))
-        R_min = float(self.cfg.R_min_coeff) * orbit_err
+        R_min = ru_ref * float(self.cfg.R_min_coeff) * orbit_err
         R = R_base + R_min
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 

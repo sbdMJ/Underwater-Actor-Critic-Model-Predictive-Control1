@@ -46,7 +46,7 @@ reward_mode: orbit_ppo
 
 reward_orbit_z_target_mode: fixed
 
-reward_orbit_sigma_r: 0.20
+reward_orbit_sigma_r: 0.40
 reward_orbit_sigma_z: 0.20
 
 reward_orbit_sigma_roll: 0.35   # rad (~20deg)
@@ -57,7 +57,7 @@ reward_orbit_theta_scale: 0.0872664626  # 5deg in rad
 reward_orbit_v_tan_ref: 0.5 
 reward_orbit_yaw_offset: 0.0
 
-reward_orbit_progress_gate_mode: mul
+reward_orbit_progress_gate_mode: none
 reward_orbit_gate_heading_power: 2.0
 reward_orbit_gate_radius_power: 1.0
 reward_orbit_gate_heading_min: 0.8
@@ -67,13 +67,15 @@ reward_orbit_gate_radius_min: 0.8
 reward_orbit_w_radius: 1.0
 reward_orbit_w_depth: 1.0
 reward_orbit_w_heading: 0.5
-reward_orbit_w_progress: 0.5
+reward_orbit_w_progress: 1.0
 # Penalize progress in the wrong direction (helps enforce clockwise).
 reward_orbit_w_backwards: 0.5
 reward_orbit_w_att: 0.25
+# Discourage "slow/stationary" local optima: penalize tangential-speed shortfall (v_tan < v_ref).
+reward_orbit_w_vtan_shortfall: 2.0
 
 # Sparse lap bonus: +bonus each time the vehicle completes a full 2*pi orbit (in desired direction).
-reward_orbit_lap_bonus: 0.0
+reward_orbit_lap_bonus: 1.0
 
 # Penalty weights.
 reward_orbit_w_u: 0.05
@@ -91,8 +93,8 @@ reward_orbit_rp_max_deg: 60.0
 reward_orbit_terminate_penalty: -0.5
 
 # Reward clipping.
-reward_orbit_clip_min: -2.0
-reward_orbit_clip_max: 2.0
+reward_orbit_clip_min: -5.0
+reward_orbit_clip_max: 5.0
 
 # Optional: stationary penalty (discourage staying at the same XY position too long).
 # - delta_xy < xy_eps is considered "still"
@@ -153,8 +155,8 @@ include_cylinder_rel_in_obs: false
 use_pypose_mpc: true
 pypose_orbit_mode: cylinder_cost
 pypose_orbit_waypoint_lookahead_steps: 20
-pypose_mpc_horizon: 3
-pypose_mpc_ilqr_iters: 2
+pypose_mpc_horizon: 6
+pypose_mpc_ilqr_iters: 3
 pypose_mpc_ilqr_reg: 1e-3
 pypose_mpc_terminal_weight_mult: 50.0
 # If unset, falls back to mpc_max_thruster_force.

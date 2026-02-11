@@ -46,7 +46,7 @@ reward_mode: orbit_ppo
 reward_orbit_z_target_mode: fixed
 
 # (1) Radius/depth shaping: r = exp(-(|e|/sigma)^2)
-reward_orbit_sigma_r: 0.20
+reward_orbit_sigma_r: 0.40
 reward_orbit_sigma_z: 0.20
 
 # (5) Roll/pitch shaping: r_att = exp(-((|roll|/sigma_roll)^2 + (|pitch|/sigma_pitch)^2))
@@ -66,7 +66,7 @@ reward_orbit_yaw_offset: 0.0
 
 # Progress gating (encourage: "look at cylinder while orbiting")
 # - none|mul|threshold
-reward_orbit_progress_gate_mode: mul
+reward_orbit_progress_gate_mode: none
 reward_orbit_gate_heading_power: 2.0
 reward_orbit_gate_radius_power: 1.0
 reward_orbit_gate_heading_min: 0.8
@@ -76,10 +76,12 @@ reward_orbit_gate_radius_min: 0.8
 reward_orbit_w_radius: 1.0
 reward_orbit_w_depth: 1.0
 reward_orbit_w_heading: 0.5
-reward_orbit_w_progress: 0.5
+reward_orbit_w_progress: 1.0
 # Penalize progress in the wrong direction (helps enforce clockwise).
 reward_orbit_w_backwards: 0.5
 reward_orbit_w_att: 0.25
+# Discourage "slow/stationary" local optima: penalize tangential-speed shortfall (v_tan < v_ref).
+reward_orbit_w_vtan_shortfall: 2.0
 
 # Sparse lap bonus: +bonus each time the vehicle completes a full 2*pi orbit (in desired direction).
 reward_orbit_lap_bonus: 1.0

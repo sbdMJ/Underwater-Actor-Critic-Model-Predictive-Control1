@@ -302,9 +302,9 @@ def main(cfg):
         ~/isaac410/python.sh scripts/evaluate_pypose_mpc_ppo.py   task=OrbitCylinder_MPC algo=ppo_pypose_cylinder_mpc_werr_wu_tv   task.reward_mode=orbit_cost task.orbit_target_mode=auto   task.use_internal_mpc=false task.include_cylinder_rel_in_obs=false   headless=false enable_livestream=false env.num_envs=1 mode=evaluate   +eval.ckpt=/path/to/checkpoint_final.pt +eval.steps=4000   +eval.print_every=200 +eval.print_weights_every=200   +eval.video_path=/tmp/orbit_eval.mp4 +eval.render_interval=2
 
     Trajectory logging (default on when mode=evaluate):
-      - Saves `trajectory.npz` under Hydra's run dir (./outputs/...).
+      - Saves `trajectory.npz` under the launch working directory by default.
       - Saves plots by default:
-          - `trajectory.png`         (|v_tan - v_tan_ref| colormap if available; else speed)
+          - `trajectory.png`         (default colormap: `v_tan_err`)
           - `trajectory_energy.png`  (energy proxy colormap, E = Σ|u_i|^3, if available)
           - `trajectory_energy_polar.png` (polar plot: orbit angle vs instantaneous power proxy, P_total = Σ|u_i|^3)
       - Disable with `+eval.save_traj=false`.
@@ -332,7 +332,7 @@ def main(cfg):
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    steps = int(eval_cfg.get("steps", 2000))
+    steps = int(eval_cfg.get("steps", 2000)) 
     seed = int(eval_cfg.get("seed", cfg.get("seed", 0)))
     print_every = int(eval_cfg.get("print_every", 200))
     print_weights_every = int(eval_cfg.get("print_weights_every", print_every))
@@ -700,11 +700,7 @@ def main(cfg):
 
                     traj_color_key = str(eval_cfg.get("traj_color_key", eval_cfg.get("traj_color", ""))).strip()
                     if not traj_color_key:
-                        traj_color_key = (
-                            "v_tan_err"
-                            if (np.isfinite(v_tan_ref) and hasattr(base_env, "cylinder_center"))
-                            else "speed"
-                        )
+                        traj_color_key = "v_tan_err"
                     plot_trajectory_3d(
                         traj_path=traj_path,
                         out_path=traj_png_path,
