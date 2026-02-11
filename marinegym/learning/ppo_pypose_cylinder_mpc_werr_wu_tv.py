@@ -308,6 +308,7 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         #   actor_out[..., 0] -> raw R
         #   actor_out[..., 1] -> raw disturbance gain gamma_d
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
+        self._mpc_failed_once = False
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         obs = obs.squeeze(-2)
@@ -373,9 +374,18 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
                 w_u_seq=w_u_seq,
                 gamma_d=gamma_d,
             )
-        except Exception:
+        except Exception as exc:
+            if not self._mpc_failed_once:
+                print(f"[_MPCMeanActorOrbitErrTV] WARNING: MPC solve failed once; falling back to zero action. err={exc!r}")
+                self._mpc_failed_once = True
             u0 = torch.zeros((root_state.shape[0], self.nu), device=root_state.device, dtype=root_state.dtype)
-        u0 = torch.nan_to_num(u0).clamp(-1.0, 1.0)
+
+        if not torch.isfinite(u0).all():
+            if not self._mpc_failed_once:
+                print("[_MPCMeanActorOrbitErrTV] WARNING: MPC returned non-finite action; replacing with zeros.")
+                self._mpc_failed_once = True
+            u0 = torch.where(torch.isfinite(u0), u0, torch.zeros_like(u0))
+        u0 = u0.clamp(-1.0, 1.0)
 
         loc = u0.view(*batch_shape, 1, self.nu).to(dtype=obs.dtype)
 

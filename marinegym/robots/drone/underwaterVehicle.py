@@ -755,7 +755,10 @@ class UnderwaterVehicle(RobotBase):
             self.thrusts[..., 0] = thrusts
 
         self.forces.zero_()
-        flow_vels = self.flow_vels + torch.rand_like(self.flow_vels) * self.flow_noise_scale
+        # Use zero-mean Gaussian perturbation for flow noise.
+        # A one-sided (always-positive) perturbation creates a biased current that can
+        # systematically drift policies during train/eval.
+        flow_vels = self.flow_vels + torch.randn_like(self.flow_vels) * self.flow_noise_scale
         hydro_forces, hydro_torques = self.apply_hydrodynamic_forces(flow_vels)
         self.forces += hydro_forces
         self.torques += hydro_torques
@@ -931,7 +934,11 @@ class UnderwaterVehicle(RobotBase):
         self.throttle_difference[env_ids] = 0.0
         self.prev_body_acc[env_ids] = 0.0
         self.prev_body_vels[env_ids] = 0.0
-        self.flow_vels[env_ids] = torch.rand_like(self.flow_vels[env_ids]) * self.max_flow_vel[env_ids]
+        # Initialize flow with signed uniform samples in [-max_flow, +max_flow]
+        # to avoid directional bias at episode reset.
+        self.flow_vels[env_ids] = (
+            torch.empty_like(self.flow_vels[env_ids]).uniform_(-1.0, 1.0) * self.max_flow_vel[env_ids]
+        )
         return env_ids
 
     
