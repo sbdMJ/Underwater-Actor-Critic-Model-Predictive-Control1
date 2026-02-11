@@ -45,7 +45,7 @@ class OrbitCylinderMPC(HoverMPC):
 
         flow_cfg = self.disturbances[self.mode]["flow"] if hasattr(self, "disturbances") else {}
         default_update_mode = "hybrid" if self.training else "ou"
-        default_init_mode = "uniform_signed" if self.training else "uniform"
+        default_init_mode = "uniform_signed"
         self.flow_update_mode = str(flow_cfg.get("update_mode", default_update_mode)).strip().lower()
         self.flow_init_mode = str(flow_cfg.get("init_mode", default_init_mode)).strip().lower()
         self.flow_hybrid_prob = float(flow_cfg.get("hybrid_prob", 0.5))
