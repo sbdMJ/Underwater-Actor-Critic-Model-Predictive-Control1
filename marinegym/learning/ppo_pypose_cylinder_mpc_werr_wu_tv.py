@@ -246,13 +246,14 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         wu0 = wu0.clamp(min=cfg.wu_lb, max=cfg.wu_ub)
 
         if cfg.weights_log_scale:
-            se0 = (torch.log(werr0) - math.log(cfg.werr_lb)) / (math.log(cfg.werr_ub) - math.log(cfg.werr_lb))
             su0 = (torch.log(wu0) - math.log(cfg.wu_lb)) / (math.log(cfg.wu_ub) - math.log(cfg.wu_lb))
         else:
-            se0 = (werr0 - cfg.werr_lb) / (cfg.werr_ub - cfg.werr_lb)
             su0 = (wu0 - cfg.wu_lb) / (cfg.wu_ub - cfg.wu_lb)
 
-        raw_e0 = _inv_sigmoid(se0)
+        # Q parametrization uses q = q0 * exp(delta_q), so the neutral initialization is delta_q = 0.
+        # Using the previous sigmoid-bounded initialization here would push raw_e toward large magnitudes
+        # and immediately clamp at ±ln(3), causing near-constant saturated Q values.
+        raw_e0 = torch.zeros_like(werr0)
         raw_u0 = _inv_sigmoid(su0)
         raw0 = torch.cat([raw_e0, raw_u0], dim=-1)  # (ne+nu,)
         raw0 = raw0.repeat(self.horizon)  # (horizon*(ne+nu),)
@@ -276,6 +277,7 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         # Keep these as leaf buffers so deepcopy(policy) in TorchRL collectors remains valid.
         self.register_buffer("last_temporal_smooth_loss", torch.zeros((), dtype=torch.float32), persistent=False)
         self.register_buffer("last_horizon_smooth_loss", torch.zeros((), dtype=torch.float32), persistent=False)
+        self.register_buffer("last_q_delta_sat_ratio", torch.zeros((), dtype=torch.float32), persistent=False)
 
     def _compute_delta_q(self, raw_e: torch.Tensor) -> torch.Tensor:
         delta_lim = float(getattr(self.cfg, "q_delta_log_limit", 1.0986122886681098))
@@ -308,6 +310,7 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         raw = self.head(feat).view(obs_flat.shape[0], self.horizon, self.ne + self.nu)
         raw_e = raw[..., : self.ne]
 
+        delta_lim = float(getattr(self.cfg, "q_delta_log_limit", 1.0986122886681098))
         delta_q = self._compute_delta_q(raw_e)
         w_err = self.base_werr.to(device=obs_flat.device, dtype=obs_flat.dtype) * torch.exp(delta_q)
 
@@ -327,6 +330,8 @@ class _NeuralDiagCostMapOrbitErrHorizon(nn.Module):
         temporal, horizon = self.compute_smoothness_penalty(obs_flat)
         self.last_temporal_smooth_loss.copy_(temporal.detach().to(dtype=self.last_temporal_smooth_loss.dtype))
         self.last_horizon_smooth_loss.copy_(horizon.detach().to(dtype=self.last_horizon_smooth_loss.dtype))
+        sat = (delta_q.abs() >= (delta_lim - 1e-6)).float().mean()
+        self.last_q_delta_sat_ratio.copy_(sat.detach().to(dtype=self.last_q_delta_sat_ratio.dtype))
 
         return w_err, w_u
 
@@ -600,6 +605,7 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
         value_loss = torch.max(value_loss_original, value_loss_clipped)
 
         smooth_loss = torch.tensor(0.0, device=policy_loss.device)
+        cost_map = None
         try:
             actor_core = self.actor.module.module
             cost_map = getattr(actor_core, "cost_map", None)
@@ -628,6 +634,12 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
             self.actor_opt.step()
         self.critic_opt.step()
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
+        q_delta_sat_ratio = torch.tensor(0.0, device=smooth_loss.device)
+        try:
+            if cost_map is not None:
+                q_delta_sat_ratio = cost_map.last_q_delta_sat_ratio.detach().to(device=smooth_loss.device)
+        except Exception:
+            pass
         return TensorDict(
             {
                 "policy_loss": policy_loss,
@@ -637,6 +649,7 @@ class PPOPyposeCylinderMPCWErrWUTVPolicy(TensorDictModuleBase):
                 "critic_grad_norm": critic_grad_norm,
                 "explained_var": explained_var,
                 "q_smooth_loss": smooth_loss.detach(),
+                "q_delta_sat_ratio": q_delta_sat_ratio,
             },
             [],
         )
