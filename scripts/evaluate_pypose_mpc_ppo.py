@@ -599,11 +599,19 @@ def main(cfg):
                             actor_out = mpc_actor.actor_head(actor_feat)
                             r_raw = actor_out[:, 0]
                             rpos = obs_flat[:, 0:3]
-                            R_base = torch.exp(r_raw)
+                            r_add_base = torch.sigmoid(r_raw)
+                            if bool(getattr(mpc_actor.cfg, "weights_log_scale", True)):
+                                log_lb = float(np.log(float(mpc_actor.cfg.wu_lb)))
+                                log_ub = float(np.log(float(mpc_actor.cfg.wu_ub)))
+                                r_add_base = torch.exp(log_lb + (log_ub - log_lb) * r_add_base)
+                            else:
+                                r_add_base = float(mpc_actor.cfg.wu_lb) + (
+                                    float(mpc_actor.cfg.wu_ub) - float(mpc_actor.cfg.wu_lb)
+                                ) * r_add_base
                             dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
                             orbit_err = torch.abs(dist_xy - float(mpc_actor.cfg.orbit_radius))
                             R_min = float(mpc_actor.cfg.R_min_coeff) * orbit_err
-                            r_add = R_base + R_min
+                            r_add = torch.clamp(r_add_base + R_min, max=float(mpc_actor.cfg.wu_ub) * 2.0)
                             w_u_seq = w_u_seq + r_add.view(-1, 1, 1)
                             r_add_mean = float(r_add.mean().item())
                     if int(w_a_seq.shape[-1]) == 13:

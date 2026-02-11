@@ -408,11 +408,17 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
         if bool(getattr(self.cfg, "learn_r", False)):
             # Optional additive R adaptation on top of base w_u sequence.
-            R_base = torch.exp(r_raw)
+            # Use bounded mapping (instead of exp) to avoid unstable/unbounded R spikes.
+            r_add_base = _map_raw_to_positive(
+                r_raw.unsqueeze(-1),
+                float(self.cfg.wu_lb),
+                float(self.cfg.wu_ub),
+                log_scale=bool(self.cfg.weights_log_scale),
+            ).squeeze(-1)
             dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
             orbit_err = torch.abs(dist_xy - float(self.cfg.orbit_radius))
             R_min = float(self.cfg.R_min_coeff) * orbit_err
-            r_add = R_base + R_min
+            r_add = (r_add_base + R_min).clamp(max=float(self.cfg.wu_ub) * 2.0)
             w_u_seq = w_u_seq + r_add.view(-1, 1, 1)
             self.last_r_add_mean.copy_(r_add.mean().detach().to(dtype=self.last_r_add_mean.dtype))
         else:
