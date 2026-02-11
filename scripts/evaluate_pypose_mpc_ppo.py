@@ -593,11 +593,27 @@ def main(cfg):
                     obs_flat = obs.reshape(-1, obs.shape[-1])
                     with torch.no_grad():
                         w_a_seq, w_u_seq = mpc_actor.cost_map(obs_flat)
+                        r_add_mean = 0.0
+                        if bool(getattr(getattr(mpc_actor, "cfg", None), "learn_r", False)):
+                            actor_feat = mpc_actor.actor_trunk(obs_flat)
+                            actor_out = mpc_actor.actor_head(actor_feat)
+                            r_raw = actor_out[:, 0]
+                            rpos = obs_flat[:, 0:3]
+                            R_base = torch.exp(r_raw)
+                            dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
+                            orbit_err = torch.abs(dist_xy - float(mpc_actor.cfg.orbit_radius))
+                            R_min = float(mpc_actor.cfg.R_min_coeff) * orbit_err
+                            r_add = R_base + R_min
+                            w_u_seq = w_u_seq + r_add.view(-1, 1, 1)
+                            r_add_mean = float(r_add.mean().item())
                     if int(w_a_seq.shape[-1]) == 13:
                         s0, sL = _summarize_weights(w_a_seq, w_u_seq)
                     else:
                         s0, sL = _summarize_orbit_weights(w_a_seq, w_u_seq)
-                    print(f"[eval] t={t} w0={s0} wT={sL}")
+                    if bool(getattr(getattr(mpc_actor, "cfg", None), "learn_r", False)):
+                        print(f"[eval] t={t} w0={s0} wT={sL} r_add_mean={r_add_mean:.4f}")
+                    else:
+                        print(f"[eval] t={t} w0={s0} wT={sL} (R fixed)")
                 except Exception:
                     pass
 

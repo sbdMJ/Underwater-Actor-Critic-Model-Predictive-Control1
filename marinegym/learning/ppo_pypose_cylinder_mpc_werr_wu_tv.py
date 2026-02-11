@@ -377,9 +377,10 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         )
         self.actor_head = nn.Linear(hidden, 2)
         # actor outputs:
-        #   actor_out[..., 0] -> reserved (unused when R is fixed)
+        #   actor_out[..., 0] -> raw R-addition term (used only when cfg.learn_r=True)
         #   actor_out[..., 1] -> raw disturbance gain gamma_d
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
+        self.register_buffer("last_r_add_mean", torch.zeros((), dtype=torch.float32), persistent=False)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         obs = obs.squeeze(-2)
@@ -402,10 +403,20 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         r_raw = actor_out[:, 0]
         gamma_d_raw = actor_out[:, 1]
 
-        _ = r_raw
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 
         w_err_seq, w_u_seq = self.cost_map(obs_flat)
+        if bool(getattr(self.cfg, "learn_r", False)):
+            # Optional additive R adaptation on top of base w_u sequence.
+            R_base = torch.exp(r_raw)
+            dist_xy = torch.linalg.norm(rpos[:, :2], dim=-1)
+            orbit_err = torch.abs(dist_xy - float(self.cfg.orbit_radius))
+            R_min = float(self.cfg.R_min_coeff) * orbit_err
+            r_add = R_base + R_min
+            w_u_seq = w_u_seq + r_add.view(-1, 1, 1)
+            self.last_r_add_mean.copy_(r_add.mean().detach().to(dtype=self.last_r_add_mean.dtype))
+        else:
+            self.last_r_add_mean.zero_()
 
         if bool(getattr(self.cfg, "obs_has_cylinder_rel", False)):
             center = obs_flat[:, -3:].to(dtype=root_state.dtype)  # cylinder_center - target_pos
