@@ -91,8 +91,8 @@ class PPOPyposeCylinderMPCWErrWUTVConfig:
     R_min_coeff: float = 0.2
     gamma_d_max: float = 5.0
 
-    # AC-MPC stabilization: keep R fixed, only adapt Q = Q0 * exp(delta_q).
-    learn_r: bool = False
+    # AC-MPC cost adaptation: Q = Q0 * exp(delta_q), with optional R learning (enabled by default).
+    learn_r: bool = True
     q_delta_log_limit: float = 1.0986122886681098  # ln(3)
     q_smooth_temporal_coef: float = 1e-3
     q_smooth_horizon_coef: float = 1e-3
