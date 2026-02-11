@@ -347,18 +347,15 @@ def main(cfg):
             include_cylinder_rel = bool(cfg.task.get("include_cylinder_rel_in_obs", False))
             if reward_mode in ("orbit_cost", "orbit_ppo", "cylinder_cost", "cylinder_orbit_cost", "orbit") and not include_cylinder_rel:
                 logging.warning(
-                    "Orbit reward mode uses cylinder-orbit errors; forcing include_cylinder_rel_in_obs=true "
-                    "so the actor-side differentiable MPC always receives cylinder center information."
+                    "Orbit reward mode is active but include_cylinder_rel_in_obs=false. "
+                    "Keeping the user config as-is to avoid observation-spec/runtime mismatch; "
+                    "set task.include_cylinder_rel_in_obs=true from CLI/config for better disturbance robustness."
                 )
-                include_cylinder_rel = True
-                cfg.task.include_cylinder_rel_in_obs = True
             elif orbit_target_mode in ("waypoint", "moving_waypoint", "wp") and not include_cylinder_rel:
                 logging.warning(
                     "Orbit target is a moving waypoint but include_cylinder_rel_in_obs=false; "
-                    "forcing include_cylinder_rel_in_obs=true so the MPC has access to the cylinder center."
+                    "keeping config as-is for compatibility. Consider enabling it explicitly."
                 )
-                include_cylinder_rel = True
-                cfg.task.include_cylinder_rel_in_obs = True
             cfg.algo.obs_has_cylinder_rel = include_cylinder_rel
 
             if not cfg.algo.get("werr_init", None):

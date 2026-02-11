@@ -309,6 +309,17 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         #   actor_out[..., 1] -> raw disturbance gain gamma_d
         self.actor_log_std = nn.Parameter(torch.full((self.nu,), float(cfg.actor_log_std_init)))
 
+
+    @staticmethod
+    def _align_obs_dim(obs_flat: torch.Tensor, expected_dim: int) -> torch.Tensor:
+        dim = int(obs_flat.shape[-1])
+        if dim == expected_dim:
+            return obs_flat
+        if dim > expected_dim:
+            return obs_flat[..., :expected_dim]
+        pad = torch.zeros((*obs_flat.shape[:-1], expected_dim - dim), device=obs_flat.device, dtype=obs_flat.dtype)
+        return torch.cat([obs_flat, pad], dim=-1)
+
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         obs = obs.squeeze(-2)
         batch_shape = obs.shape[:-1]
@@ -325,7 +336,13 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         pos_rel = -rpos  # drone_pos - target_pos (target at origin)
         root_state = torch.cat([pos_rel, quat, vel_b], dim=-1)  # (B, 13)
 
-        actor_feat = self.actor_trunk(obs_flat)
+        actor_in = obs_flat
+        first_linear = self.actor_trunk[0]
+        in_features = int(getattr(first_linear, "in_features", obs_flat.shape[-1]))
+        if in_features > 0:
+            actor_in = self._align_obs_dim(obs_flat, in_features)
+
+        actor_feat = self.actor_trunk(actor_in)
         actor_out = self.actor_head(actor_feat)
         r_raw = actor_out[:, 0]
         gamma_d_raw = actor_out[:, 1]
@@ -353,7 +370,13 @@ class _MPCMeanActorOrbitErrTV(nn.Module):
         R = R_base + R_min
         gamma_d = torch.sigmoid(gamma_d_raw) * float(self.cfg.gamma_d_max)
 
-        w_err_seq, w_u_seq = self.cost_map(obs_flat)
+        cost_in = obs_flat
+        cost_first = self.cost_map.trunk[0]
+        cost_in_features = int(getattr(cost_first, "in_features", obs_flat.shape[-1]))
+        if cost_in_features > 0:
+            cost_in = self._align_obs_dim(obs_flat, cost_in_features)
+
+        w_err_seq, w_u_seq = self.cost_map(cost_in)
         w_u_seq = w_u_seq + R.view(-1, 1, 1)
 
         if bool(getattr(self.cfg, "obs_has_cylinder_rel", False)):
