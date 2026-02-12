@@ -289,6 +289,55 @@ def _summarize_orbit_weights(w_err_seq: torch.Tensor, w_u_seq: torch.Tensor):
     return s0, sL
 
 
+def _extract_mpc_weights_for_env(td, mpc_actor, env_id: int):
+    if mpc_actor is None or td is None:
+        return None, None, None
+    try:
+        obs = td[("agents", "observation")].squeeze(-2)
+        obs_flat = obs.reshape(-1, obs.shape[-1])
+        with torch.no_grad():
+            w_a_seq, w_u_seq = mpc_actor.cost_map(obs_flat)
+
+        idx = int(np.clip(int(env_id), 0, max(0, int(w_a_seq.shape[0]) - 1)))
+        w_a0 = w_a_seq[idx, 0, :].detach().cpu().to(dtype=torch.float32).numpy().reshape(-1)
+        w_u0 = w_u_seq[idx, 0, :].detach().cpu().to(dtype=torch.float32).numpy().reshape(-1)
+
+        if int(w_a0.shape[0]) == 13:
+            names = [
+                "q_x",
+                "q_y",
+                "q_z",
+                "q_qw",
+                "q_qx",
+                "q_qy",
+                "q_qz",
+                "q_vx",
+                "q_vy",
+                "q_vz",
+                "q_wx",
+                "q_wy",
+                "q_wz",
+            ]
+        elif int(w_a0.shape[0]) == 10:
+            names = [
+                "q_radial",
+                "q_z",
+                "q_tan",
+                "q_radial_speed",
+                "q_heading_cos",
+                "q_heading_sin",
+                "q_roll",
+                "q_pitch",
+                "q_wx",
+                "q_wy",
+            ]
+        else:
+            names = [f"q_{i}" for i in range(int(w_a0.shape[0]))]
+        return w_a0, w_u0, names
+    except Exception:
+        return None, None, None
+
+
 @hydra.main(version_base=None, config_path=FILE_PATH, config_name="train")
 def main(cfg):
     """
@@ -375,6 +424,15 @@ def main(cfg):
         traj_energy_polar_png_path = _get_launch_cwd() / traj_energy_polar_png_path
     energy_polar_bin_deg = float(eval_cfg.get("energy_polar_bin_deg", 5.0))
     energy_polar_show_raw = bool(eval_cfg.get("energy_polar_show_raw", False))
+    plot_qr_disturbance = bool(eval_cfg.get("plot_qr_disturbance", True))
+    traj_qr_png_out = eval_cfg.get("traj_qr_png_path", None)
+    traj_qr_png_path = (
+        Path(str(traj_qr_png_out)).expanduser()
+        if traj_qr_png_out
+        else traj_png_path.with_name(traj_png_path.stem + "_qr_disturbance" + traj_png_path.suffix)
+    )
+    if not traj_qr_png_path.is_absolute():
+        traj_qr_png_path = _get_launch_cwd() / traj_qr_png_path
     plot_traj = bool(eval_cfg.get("plot_traj", True))
     plot_heading_stride = int(eval_cfg.get("plot_heading_stride", 50))
     plot_arrow_len = float(eval_cfg.get("plot_arrow_len", 0.25))
@@ -420,6 +478,9 @@ def main(cfg):
     flow_log = []
     done_log = []
     step_log = []
+    q_weight_log = []
+    r_weight_log = []
+    q_weight_names_ref = None
 
     traj_nu = int(getattr(base_env.drone, "num_rotors", 0) or 0)
     if traj_nu <= 0:
@@ -442,7 +503,7 @@ def main(cfg):
 
     last_action_cmd = None
 
-    def _maybe_log_traj(*, step: int, done: bool) -> None:
+    def _maybe_log_traj(*, step: int, done: bool, td_cur=None) -> None:
         if not save_traj:
             return
         if (int(step) % int(traj_stride)) != 0:
@@ -535,10 +596,21 @@ def main(cfg):
             energy_log.append(float(energy))
             done_log.append(bool(done))
             step_log.append(int(step))
+
+            w_q, w_r, q_names = _extract_mpc_weights_for_env(td_cur, mpc_actor, traj_env_id)
+            if w_q is None or w_r is None:
+                q_weight_log.append(np.zeros((0,), dtype=np.float32))
+                r_weight_log.append(np.zeros((0,), dtype=np.float32))
+            else:
+                q_weight_log.append(np.asarray(w_q, dtype=np.float32).reshape(-1))
+                r_weight_log.append(np.asarray(w_r, dtype=np.float32).reshape(-1))
+                nonlocal q_weight_names_ref
+                if q_weight_names_ref is None and q_names is not None:
+                    q_weight_names_ref = [str(x) for x in q_names]
         except Exception:
             return
 
-    _maybe_log_traj(step=0, done=False)
+    _maybe_log_traj(step=0, done=False, td_cur=td)
 
     with set_exploration_type(ExplorationType.MODE):
         for t in range(steps):
@@ -586,7 +658,7 @@ def main(cfg):
                     done_val = bool(done_mask_for_traj[traj_env_id].item())
                 except Exception:
                     done_val = False
-            _maybe_log_traj(step=t + 1, done=done_val)
+            _maybe_log_traj(step=t + 1, done=done_val, td_cur=td)
 
             if done is not None and bool(done.any()):
                 done_mask = done.squeeze(-1)
@@ -598,7 +670,7 @@ def main(cfg):
 
                 td.set("_reset", done_mask)
                 td = env.reset(td)
-                _maybe_log_traj(step=t + 1, done=False)
+                _maybe_log_traj(step=t + 1, done=False, td_cur=td)
 
             if not bool(cfg.headless):
                 env.render()
@@ -633,6 +705,13 @@ def main(cfg):
             flow_arr = np.stack(flow_log, axis=0).astype(np.float32, copy=False) if flow_log else np.zeros((0, 3), dtype=np.float32)
             done_arr = np.asarray(done_log, dtype=np.bool_)
             step_arr = np.asarray(step_log, dtype=np.int64)
+            q_arr = np.stack(q_weight_log, axis=0).astype(np.float32, copy=False) if q_weight_log else np.zeros((0, 0), dtype=np.float32)
+            r_arr = np.stack(r_weight_log, axis=0).astype(np.float32, copy=False) if r_weight_log else np.zeros((0, 0), dtype=np.float32)
+
+            if q_arr.shape[0] != pos_arr.shape[0]:
+                q_arr = np.zeros((pos_arr.shape[0], 0), dtype=np.float32)
+            if r_arr.shape[0] != pos_arr.shape[0]:
+                r_arr = np.zeros((pos_arr.shape[0], 0), dtype=np.float32)
 
             if flow_arr.shape[0] != pos_arr.shape[0]:
                 if flow_arr.shape[0] > pos_arr.shape[0]:
@@ -666,6 +745,9 @@ def main(cfg):
                 flow_vel_w=flow_arr,
                 current_vec_w=current_vec_w,
                 done=done_arr,
+                q_weights=q_arr,
+                q_weight_names=np.asarray((q_weight_names_ref or []), dtype=object),
+                r_weights=r_arr,
                 cylinder_center=center,
                 cylinder_radius=float(getattr(base_env, "cylinder_radius", 0.0)),
                 cylinder_height=float(getattr(base_env, "cylinder_height", 0.0)),
@@ -696,7 +778,7 @@ def main(cfg):
 
             if plot_traj:
                 try:
-                    from visualize_trajectory import plot_power_polar, plot_trajectory_3d
+                    from visualize_trajectory import plot_disturbance_qr, plot_power_polar, plot_trajectory_3d
 
                     traj_color_key = str(eval_cfg.get("traj_color_key", eval_cfg.get("traj_color", ""))).strip()
                     if not traj_color_key:
@@ -731,6 +813,14 @@ def main(cfg):
                             show=bool(plot_show),
                         )
                         print(f"[eval] saved energy polar plot: {traj_energy_polar_png_path.resolve()}")
+
+                    if plot_qr_disturbance:
+                        plot_disturbance_qr(
+                            traj_path=traj_path,
+                            out_path=traj_qr_png_path,
+                            show=bool(plot_show),
+                        )
+                        print(f"[eval] saved disturbance-Q/R plot: {traj_qr_png_path.resolve()}")
                 except Exception as exc:
                     print(f"[eval] failed to plot trajectory: {exc}")
         except Exception as exc:

@@ -482,6 +482,108 @@ def plot_power_polar(
     plt.close(fig)
 
 
+def plot_disturbance_qr(
+    *,
+    traj_path: Union[str, Path],
+    out_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+):
+    """Visualize disturbance magnitude and time-varying MPC Q/R weights over trajectory."""
+    traj_path = Path(traj_path).expanduser()
+    out_path = Path(out_path).expanduser() if out_path else None
+
+    if not show:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: WPS433
+
+    data = _load_npz(traj_path)
+    step = np.asarray(data.get("step", np.arange(len(data.get("pos", [])))), dtype=np.int64).reshape(-1)
+    pos = np.asarray(data.get("pos", None), dtype=np.float32)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"Invalid or missing 'pos' in {traj_path}")
+
+    flow = data.get("flow_vel_w", None)
+    if flow is None:
+        raise KeyError(f"Missing 'flow_vel_w' in {traj_path}")
+    flow = np.asarray(flow, dtype=np.float32)
+    if flow.ndim != 2 or flow.shape[1] < 3:
+        raise ValueError(f"Invalid flow_vel_w shape in {traj_path}: {flow.shape}")
+    flow = flow[:, 0:3]
+
+    q_weights = np.asarray(data.get("q_weights", np.zeros((pos.shape[0], 0))), dtype=np.float32)
+    r_weights = np.asarray(data.get("r_weights", np.zeros((pos.shape[0], 0))), dtype=np.float32)
+    q_names_raw = data.get("q_weight_names", np.asarray([], dtype=object))
+    q_names = [str(x) for x in np.asarray(q_names_raw).reshape(-1).tolist()]
+
+    n = int(pos.shape[0])
+    if step.shape[0] != n:
+        step = np.arange(n, dtype=np.int64)
+    if q_weights.ndim != 2 or q_weights.shape[0] != n:
+        q_weights = np.zeros((n, 0), dtype=np.float32)
+    if r_weights.ndim != 2 or r_weights.shape[0] != n:
+        r_weights = np.zeros((n, 0), dtype=np.float32)
+    if len(q_names) != int(q_weights.shape[1]):
+        q_names = [f"q_{i}" for i in range(int(q_weights.shape[1]))]
+
+    flow_mag = np.linalg.norm(flow, axis=1)
+    center = np.asarray(data.get("cylinder_center", np.nanmean(pos, axis=0)), dtype=np.float32).reshape(-1)[:3]
+    rel = pos[:, 0:2] - center[None, 0:2]
+    theta = np.mod(np.arctan2(rel[:, 1], rel[:, 0]), 2.0 * np.pi)
+
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.1])
+
+    ax_dist = fig.add_subplot(gs[0, :])
+    ax_dist.plot(step, flow_mag, color="#1f77b4", linewidth=1.4)
+    ax_dist.set_title("Disturbance magnitude over time")
+    ax_dist.set_ylabel("|flow_vel_w| [m/s]")
+    ax_dist.grid(True, alpha=0.3)
+
+    ax_q = fig.add_subplot(gs[1, :], sharex=ax_dist)
+    if q_weights.shape[1] > 0:
+        for i in range(int(q_weights.shape[1])):
+            name = q_names[i] if i < len(q_names) else f"q_{i}"
+            ax_q.plot(step, q_weights[:, i], linewidth=1.0, alpha=0.9, label=name)
+        ax_q.legend(loc="upper right", ncol=min(4, max(1, int(np.ceil(q_weights.shape[1] / 4)))), fontsize=8)
+    else:
+        ax_q.text(0.5, 0.5, "No Q weights logged", transform=ax_q.transAxes, ha="center", va="center")
+    ax_q.set_title("Time-varying Q weights (first MPC horizon step)")
+    ax_q.set_ylabel("Q weight")
+    ax_q.grid(True, alpha=0.3)
+
+    ax_r = fig.add_subplot(gs[2, 0], sharex=ax_dist)
+    if r_weights.shape[1] > 0:
+        for i in range(int(r_weights.shape[1])):
+            ax_r.plot(step, r_weights[:, i], linewidth=1.0, alpha=0.9, label=f"r_{i}")
+        ax_r.legend(loc="upper right", ncol=2, fontsize=8)
+    else:
+        ax_r.text(0.5, 0.5, "No R weights logged", transform=ax_r.transAxes, ha="center", va="center")
+    ax_r.set_title("Time-varying R weights")
+    ax_r.set_xlabel("step")
+    ax_r.set_ylabel("R weight")
+    ax_r.grid(True, alpha=0.3)
+
+    ax_orbit = fig.add_subplot(gs[2, 1], projection="polar")
+    ax_orbit.set_theta_zero_location("E")
+    ax_orbit.set_theta_direction(1)
+    ax_orbit.grid(True, alpha=0.3)
+    sc = ax_orbit.scatter(theta, flow_mag, c=flow_mag, cmap="turbo", s=8, alpha=0.85)
+    cbar = fig.colorbar(sc, ax=ax_orbit, pad=0.1, fraction=0.06)
+    cbar.set_label("|flow_vel_w| [m/s]")
+    ax_orbit.set_title("Orbit angle vs disturbance")
+
+    fig.suptitle(f"Disturbance and adaptive Q/R trajectory view: {traj_path.name}", fontsize=12)
+    fig.tight_layout()
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(out_path), dpi=200)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 def _main():
     parser = argparse.ArgumentParser(
         description="Visualize saved BlueROV trajectory (.npz) in 3D with heading arrows and an optional scalar colormap."
